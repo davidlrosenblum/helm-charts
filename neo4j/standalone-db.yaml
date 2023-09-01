@@ -1,0 +1,73 @@
+neo4j:
+  name: "standalone"
+  resources:
+    cpu: "1"
+    memory: "12G"
+
+  passwordFromSecret: "neo4jpwd"
+  offlineMaintenanceModeEnabled: false
+  # Uncomment to use enterprise edition
+  edition: "enterprise"
+  acceptLicenseAgreement: "yes"
+  minimumClusterSize: "1"
+
+services: 
+  neo4j:
+    enabled: false
+
+# nodeSelector:
+#   eks.amazonaws.com/nodegroup: "minimal"
+
+env:
+  NEO4J_PLUGINS: '["graph-data-science", "bloom", "apoc"]'
+
+
+config:
+  server.backup.enabled: "true"
+  server.config.strict_validation: "false"
+  db.logs.query.enabled: "OFF"
+  server.memory.heap.initial_size: "8GB"
+  server.memory.heap.max_size: "8GB"
+  server.memory.pagecache.size: "1GB"
+  db.tx_log.rotation.retention_policy: "1 hours"
+  gds.enterprise.license_file: "/licenses/gds.license"
+  dbms.security.procedures.unrestricted: "gds.*,apoc.*,bloom.*"
+  server.unmanaged_extension_classes: "com.neo4j.bloom.server=/bloom"
+  dbms.security.http_auth_allowlist: "/,/browser.*,/bloom.*"
+  dbms.bloom.license_file: "/licenses/bloom.license"
+
+apoc_config:
+  apoc.export.file.enabled: "true"
+  apoc.import.file.enabled: "true"
+  #apoc.trigger.enabled: "true"
+
+# Only if a custom domain is in use
+#  causal_clustering.kubernetes.cluster_domain: "neo4j.cluster.local"
+
+volumes:
+  # import:
+  #   mode: volume
+  #   volume:
+  #     setOwnerAndGroupWritableFilePermissions: true
+  #     persistentVolumeClaim:
+  #       claimName: pvc-efs-dynamic
+  licenses:
+    disableSubPathExpr: true
+    mode: volume
+    volume:
+      secret:
+        secretName: license-secret
+        items:
+          - key: gds.license
+            path: gds.license
+          - key: bloom.license
+            path: bloom.license
+  data:
+    mode: "dynamic"
+    dynamic:
+      storageClassName: ssd-xfs
+      accessModes:
+        - ReadWriteOnce
+      requests:
+        storage: 100Gi
+ 
