@@ -2,12 +2,14 @@ package integration_tests
 
 import (
 	"fmt"
+	"testing"
+	"time"
+
 	. "github.com/neo4j/helm-charts/internal/helpers"
 	"github.com/neo4j/helm-charts/internal/integration_tests/gcloud"
 	"github.com/neo4j/helm-charts/internal/model"
 	"github.com/neo4j/helm-charts/internal/resources"
 	"github.com/stretchr/testify/assert"
-	"testing"
 )
 
 func TestInstallNeo4jClusterInGcloud(t *testing.T) {
@@ -23,8 +25,9 @@ func TestInstallNeo4jClusterInGcloud(t *testing.T) {
 			closeables = append([]Closeable{closeable}, closeables...)
 		}
 	}
-
-	err := labelNodes(t)
+	clusterReleaseName := model.NewReleaseName("cluster-" + TestRunIdentifier)
+	namespace := string(clusterReleaseName.Namespace())
+	err := labelNodes(t, namespace)
 	addCloseable(func() error {
 		return removeLabelFromNodes(t)
 	})
@@ -32,18 +35,18 @@ func TestInstallNeo4jClusterInGcloud(t *testing.T) {
 		return
 	}
 
-	clusterReleaseName := model.NewReleaseName("cluster-" + TestRunIdentifier)
 	defaultHelmArgs := []string{}
 	defaultHelmArgs = append(defaultHelmArgs, model.DefaultNeo4jNameArg...)
 	headlessService := clusterHeadLessService{model.NewHeadlessServiceReleaseName(clusterReleaseName), defaultHelmArgs}
 	defaultHelmArgs = append(defaultHelmArgs, model.DefaultClusterSizeArg...)
 	defaultHelmArgs = append(defaultHelmArgs, model.LdapArgs...)
 	core1HelmArgs := append(defaultHelmArgs, model.ImagePullSecretArgs...)
-	core1HelmArgs = append(core1HelmArgs, model.NodeSelectorArgs...)
-	core2HelmArgs := append(defaultHelmArgs, model.PriorityClassNameArgs...)
+	core1HelmArgs = append(core1HelmArgs, model.NodeSelectorArgs(namespace)...)
+	core2HelmArgs := append(defaultHelmArgs, model.PriorityClassNameArgs(namespace)...)
+	core3HelmArgs := append(defaultHelmArgs, model.EnableServerArgs()...)
 	core1 := clusterCore{model.NewCoreReleaseName(clusterReleaseName, 1), core1HelmArgs}
 	core2 := clusterCore{model.NewCoreReleaseName(clusterReleaseName, 2), core2HelmArgs}
-	core3 := clusterCore{model.NewCoreReleaseName(clusterReleaseName, 3), defaultHelmArgs}
+	core3 := clusterCore{model.NewCoreReleaseName(clusterReleaseName, 3), core3HelmArgs}
 	cores := []clusterCore{core1, core2, core3}
 
 	t.Cleanup(clusterTestCleanup(t, clusterReleaseName, core1, core2, core3, true))
@@ -164,27 +167,44 @@ func TestInstallNeo4jClusterWithApocConfigInGcloud(t *testing.T) {
 
 func clusterTestCleanup(t *testing.T, clusterReleaseName model.ReleaseName, core1 clusterCore, core2 clusterCore, core3 clusterCore, removeLabels bool) func() {
 	return func() {
-		_ = runAll(t, "helm", [][]string{
-			{"uninstall", core1.name.String(), core2.name.String(), core3.name.String(), "--wait", "--timeout", "3m", "--namespace", string(clusterReleaseName.Namespace())},
-			{"uninstall", clusterReleaseName.String() + "-headless", "--wait", "--timeout", "1m", "--namespace", string(clusterReleaseName.Namespace())},
-		}, false)
-		_ = runAll(t, "kubectl", [][]string{
-			{"delete", "pvc", fmt.Sprintf("%s-pvc", core1.name.String()), "--namespace", string(clusterReleaseName.Namespace()), "--ignore-not-found"},
-			{"delete", "pvc", fmt.Sprintf("%s-pvc", core2.name.String()), "--namespace", string(clusterReleaseName.Namespace()), "--ignore-not-found"},
-			{"delete", "pvc", fmt.Sprintf("%s-pvc", core3.name.String()), "--namespace", string(clusterReleaseName.Namespace()), "--ignore-not-found"},
-			{"delete", "pv", fmt.Sprintf("%s-pv", core1.name.String()), "--ignore-not-found"},
-			{"delete", "pv", fmt.Sprintf("%s-pv", core2.name.String()), "--ignore-not-found"},
-			{"delete", "pv", fmt.Sprintf("%s-pv", core3.name.String()), "--ignore-not-found"},
-		}, false)
+		namespace := string(clusterReleaseName.Namespace())
+
+		err := run(t, "kubectl", "get", "namespace", namespace)
+		if err == nil {
+			for _, core := range []clusterCore{core1, core2, core3} {
+				_ = run(t, "kubectl", "get", "statefulset", core.name.String(), "--namespace", namespace)
+				if err == nil {
+					_ = runAll(t, "kubectl", [][]string{
+						{"scale", "statefulset", core.name.String(), "--namespace", namespace, "--replicas=0"},
+					}, false)
+				}
+			}
+
+			time.Sleep(30 * time.Second)
+
+			_ = runAll(t, "helm", [][]string{
+				{"uninstall", core1.name.String(), core2.name.String(), core3.name.String(), "--cascade=foreground", "--wait", "--timeout", "3m", "--namespace", namespace},
+				{"uninstall", clusterReleaseName.String() + "-headless", "--cascade=foreground", "--wait", "--timeout", "1m", "--namespace", namespace},
+			}, false)
+
+			time.Sleep(10 * time.Second)
+
+			_ = runAll(t, "kubectl", [][]string{
+				{"delete", "pvc", "--all", "--namespace", namespace, "--force", "--grace-period=0", "--ignore-not-found"},
+				{"delete", "pv", "--all", "--force", "--grace-period=0", "--ignore-not-found"},
+			}, false)
+
+			_ = runAll(t, "kubectl", [][]string{
+				{"delete", "namespace", namespace, "--force", "--grace-period=0", "--ignore-not-found"},
+			}, false)
+		}
+
 		_ = runAll(t, "gcloud", [][]string{
-			{"compute", "disks", "delete", fmt.Sprintf("neo4j-data-disk-%s", core1.name), "--zone=" + string(gcloud.CurrentZone()), "--project=" + string(gcloud.CurrentProject())},
-			{"compute", "disks", "delete", fmt.Sprintf("neo4j-data-disk-%s", core2.name), "--zone=" + string(gcloud.CurrentZone()), "--project=" + string(gcloud.CurrentProject())},
-			{"compute", "disks", "delete", fmt.Sprintf("neo4j-data-disk-%s", core3.name), "--zone=" + string(gcloud.CurrentZone()), "--project=" + string(gcloud.CurrentProject())},
+			{"compute", "disks", "delete", fmt.Sprintf("neo4j-data-disk-%s", core1.name), "--zone=" + string(gcloud.CurrentZone()), "--project=" + string(gcloud.CurrentProject()), "--quiet"},
+			{"compute", "disks", "delete", fmt.Sprintf("neo4j-data-disk-%s", core2.name), "--zone=" + string(gcloud.CurrentZone()), "--project=" + string(gcloud.CurrentProject()), "--quiet"},
+			{"compute", "disks", "delete", fmt.Sprintf("neo4j-data-disk-%s", core3.name), "--zone=" + string(gcloud.CurrentZone()), "--project=" + string(gcloud.CurrentProject()), "--quiet"},
 		}, false)
-		_ = runAll(t, "kubectl", [][]string{
-			{"delete", "namespace", string(clusterReleaseName.Namespace()), "--ignore-not-found", "--force", "--grace-period=0"},
-			{"delete", "priorityClass", "high-priority", "--force", "--grace-period=0"},
-		}, false)
+
 		if removeLabels {
 			_ = removeLabelFromNodes(t)
 		}

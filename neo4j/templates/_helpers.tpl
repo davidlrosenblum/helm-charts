@@ -312,16 +312,17 @@ priorityClassName: "{{ .Values.podSpec.priorityClassName }}"
 
 {{- define "neo4j.tolerations" -}}
 {{/* Add tolerations only if .Values.podSpec.tolerations contains entries */}}
-    {{- if . -}}
+    {{- if . }}
 tolerations:
 {{ toYaml . }}
-    {{- end -}}
+    {{- end }}
 {{- end -}}
 
 {{- define "neo4j.affinity" -}}
     {{- if or (.Values.podSpec.nodeAffinity) (.Values.podSpec.podAntiAffinity) }}
 affinity:
-    {{- if .Values.podSpec.podAntiAffinity }}
+    {{- if and .Values.podSpec.podAntiAffinity }}
+        {{- if eq (typeOf .Values.podSpec.podAntiAffinity) "bool" }}
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
@@ -329,6 +330,9 @@ affinity:
               app: "{{ template "neo4j.name" . }}"
               helm.neo4j.com/pod_category: "neo4j-instance"
           topologyKey: kubernetes.io/hostname
+        {{- else }}
+    podAntiAffinity: {{ toYaml .Values.podSpec.podAntiAffinity | nindent 6 }}
+        {{- end }}
     {{- end }}
     {{- if .Values.podSpec.nodeAffinity }}
     nodeAffinity:
@@ -363,4 +367,12 @@ affinity:
 WARNING: Passwords set using 'neo4j.password' will be stored in plain text in the Helm release ConfigMap.
 Please consider using 'neo4j.passwordFromSecret' for improved security.
 {{- end -}}
+{{- end -}}
+
+{{- define "neo4j.topologySpreadConstraints" -}}
+{{/* Add tolerations only if .Values.podSpec.topologySpreadConstraints contains entries */}}
+    {{- if $.Values.podSpec.topologySpreadConstraints }}
+topologySpreadConstraints:
+{{ toYaml $.Values.podSpec.topologySpreadConstraints }}
+    {{- end }}
 {{- end -}}

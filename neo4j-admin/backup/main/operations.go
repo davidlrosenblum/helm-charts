@@ -2,19 +2,35 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"strings"
+
 	"github.com/neo4j/helm-charts/neo4j-admin/backup/aws"
 	"github.com/neo4j/helm-charts/neo4j-admin/backup/azure"
 	gcp "github.com/neo4j/helm-charts/neo4j-admin/backup/gcp"
 	neo4jAdmin "github.com/neo4j/helm-charts/neo4j-admin/backup/neo4j-admin"
 	"k8s.io/utils/strings/slices"
-	"log"
-	"os"
-	"strings"
 )
 
 func awsOperations() {
-	awsClient, err := aws.NewAwsClient(os.Getenv("CREDENTIAL_PATH"))
+
+	credentialPath := os.Getenv("CREDENTIAL_PATH")
+	awsClient, err := aws.NewAwsClient(credentialPath)
 	handleError(err)
+
+	if aggregateEnabled := os.Getenv("AGGREGATE_BACKUP_ENABLED"); aggregateEnabled == "true" {
+
+		//service account is NOT used hence env variables need to be set for aggregate backup operation
+		if credentialPath != "/credentials/" {
+			err = awsClient.GenerateEnvVariablesFromCredentials()
+			handleError(err)
+		}
+
+		err = aggregateBackupOperations()
+		handleError(err)
+		return
+	}
 
 	bucketName := os.Getenv("BUCKET_NAME")
 	err = awsClient.CheckBucketAccess(bucketName)
@@ -81,7 +97,28 @@ func azureOperations() {
 	handleError(err)
 }
 
+func onPrem() {
+
+	if aggregateEnabled := os.Getenv("AGGREGATE_BACKUP_ENABLED"); aggregateEnabled == "true" {
+		err := aggregateBackupOperations()
+		handleError(err)
+		return
+	}
+
+	backupFileNames, consistencyCheckReports, err := backupOperations()
+	handleError(err)
+
+	err = deleteBackupFiles(backupFileNames, consistencyCheckReports)
+	handleError(err)
+
+}
+
+// backupOperations returns backupFileNames , consistencyCheckReports and error
+// performs aggregate backup is aggregate backup is enabled
 func backupOperations() ([]string, []string, error) {
+	if err := deleteBackupFiles([]string{}, []string{}); err != nil {
+		log.Printf("Warning: failed to cleanup existing backups: %v", err)
+	}
 
 	address, err := generateAddress()
 	if err != nil {
@@ -91,53 +128,46 @@ func backupOperations() ([]string, []string, error) {
 	consistencyCheckDBs := strings.Split(os.Getenv("CONSISTENCY_CHECK_DATABASE"), ",")
 	consistencyCheckEnabled := os.Getenv("CONSISTENCY_CHECK_ENABLE")
 
-	var fileNames, consistencyCheckReports []string
-	for _, database := range databases {
-		fileName, err := neo4jAdmin.PerformBackup(address, database)
-		if err != nil {
-			return nil, nil, err
-		}
-		log.Printf("Backup File Name is %s", fileName)
-		fileNames = append(fileNames, fileName)
+	var consistencyCheckReports []string
+	backupFileNames, err := neo4jAdmin.PerformBackup(address)
+	if err != nil {
+		return nil, nil, err
+	}
+	log.Printf("Backup File Name(s) %v", backupFileNames)
 
-		if slices.Contains(consistencyCheckDBs, database) && consistencyCheckEnabled == "true" {
-			reportArchiveName, err := neo4jAdmin.PerformConsistencyCheck(fileName, database)
-			if err != nil {
-				return nil, nil, err
+	if consistencyCheckEnabled == "true" {
+		for _, consistencyCheckDB := range consistencyCheckDBs {
+			if slices.Contains(databases, consistencyCheckDB) || slices.Contains(databases, "*") {
+				reportArchiveName, err := neo4jAdmin.PerformConsistencyCheck(consistencyCheckDB)
+				if err != nil {
+					return nil, nil, err
+				}
+				if len(reportArchiveName) != 0 {
+					consistencyCheckReports = append(consistencyCheckReports, reportArchiveName)
+				}
 			}
-			consistencyCheckReports = append(consistencyCheckReports, reportArchiveName)
 		}
 	}
-
-	return fileNames, consistencyCheckReports, nil
+	return backupFileNames, consistencyCheckReports, nil
 }
 
-// startupOperations includes the following
-func startupOperations() {
-	dir, err := os.Getwd()
-	handleError(err)
-	log.Printf("printing current directory %s", dir)
+// aggregateBackupOperations perform aggregate backup
+func aggregateBackupOperations() error {
+	err := neo4jAdmin.PerformAggregateBackup()
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
+func startupOperations() {
 	address, err := generateAddress()
 	handleError(err)
 
 	err = neo4jAdmin.CheckDatabaseConnectivity(address)
 	handleError(err)
-}
 
-// generateAddress returns the backup address in the format <hostip:port> or <standalone-admin.default.svc.cluster.local:port>
-func generateAddress() (string, error) {
-	if ip := os.Getenv("DATABASE_SERVICE_IP"); len(ip) > 0 {
-		address := fmt.Sprintf("%s:%s", ip, os.Getenv("DATABASE_BACKUP_PORT"))
-		log.Printf("Address := %s", address)
-		return address, nil
-	}
-	if serviceName := os.Getenv("DATABASE_SERVICE_NAME"); len(serviceName) > 0 {
-		address := fmt.Sprintf("%s.%s.svc.%s:%s", serviceName, os.Getenv("DATABASE_NAMESPACE"), os.Getenv("DATABASE_CLUSTER_DOMAIN"), os.Getenv("DATABASE_BACKUP_PORT"))
-		log.Printf("Address := %s", address)
-		return address, nil
-	}
-	return "", fmt.Errorf("cannot generate address. Invalid DATABASE_SERVICE_IP = %s or DATABASE_SERVICE_NAME = %s", os.Getenv("DATABASE_SERVICE_IP"), os.Getenv("DATABASE_SERVICE_NAME"))
+	os.Setenv("LOCATION", "/backups")
 }
 
 func handleError(err error) {
@@ -146,19 +176,43 @@ func handleError(err error) {
 	}
 }
 
-func deleteBackupFiles(backupFileNames, consistencyCheckReports []string) error {
-	for _, backupFileName := range backupFileNames {
-		log.Printf("Deleting file /backups/%s", backupFileName)
-		err := os.Remove(fmt.Sprintf("/backups/%s", backupFileName))
-		if err != nil {
-			return err
-		}
+// generateAddress returns the backup address in the format <hostip:port> or <standalone-admin.default.svc.cluster.local:port>
+func generateAddress() (string, error) {
+	if endpoints := os.Getenv("DATABASE_BACKUP_ENDPOINTS"); len(endpoints) > 0 {
+		return endpoints, nil
 	}
-	for _, consistencyCheckReportName := range consistencyCheckReports {
-		log.Printf("Deleting file /backups/%s", consistencyCheckReportName)
-		err := os.Remove(fmt.Sprintf("/backups/%s", consistencyCheckReportName))
-		if err != nil {
-			return err
+
+	// Legacy support for single endpoint
+	if ip := os.Getenv("DATABASE_SERVICE_IP"); len(ip) > 0 {
+		return fmt.Sprintf("%s:%s", ip, os.Getenv("DATABASE_BACKUP_PORT")), nil
+	}
+
+	if serviceName := os.Getenv("DATABASE_SERVICE_NAME"); len(serviceName) > 0 {
+		return fmt.Sprintf("%s.%s.svc.%s:%s",
+			serviceName,
+			os.Getenv("DATABASE_NAMESPACE"),
+			os.Getenv("DATABASE_CLUSTER_DOMAIN"),
+			os.Getenv("DATABASE_BACKUP_PORT")), nil
+	}
+
+	return "", fmt.Errorf("no valid backup endpoints specified")
+}
+
+func deleteBackupFiles(backupFileNames, consistencyCheckReports []string) error {
+	if value, present := os.LookupEnv("KEEP_BACKUP_FILES"); present && value == "false" {
+		for _, backupFileName := range backupFileNames {
+			log.Printf("Deleting file /backups/%s", backupFileName)
+			err := os.Remove(fmt.Sprintf("/backups/%s", backupFileName))
+			if err != nil {
+				return err
+			}
+		}
+		for _, consistencyCheckReportName := range consistencyCheckReports {
+			log.Printf("Deleting file /backups/%s", consistencyCheckReportName)
+			err := os.Remove(fmt.Sprintf("/backups/%s", consistencyCheckReportName))
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

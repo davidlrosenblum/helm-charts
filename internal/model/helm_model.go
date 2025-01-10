@@ -11,6 +11,7 @@ type ReleaseName interface {
 	Namespace() Namespace
 	DiskName() PersistentDiskName
 	PodName() string
+	ShortName() string
 	EnvConfigMapName() string
 	UserConfigMapName() string
 	InternalServiceName() string
@@ -64,14 +65,13 @@ func (r *releaseName) ServerLogsConfigMapName() string {
 func (r *releaseName) InternalServiceName() string {
 	return string(*r) + "-internals"
 }
+func (r *releaseName) ShortName() string {
+	len := len(string(*r)) / 2
+	return string(*r)[0:len]
+}
 
 func NewCoreReleaseName(clusterName ReleaseName, number int) ReleaseName {
 	r := clusterMemberReleaseName{clusterName, releaseName(fmt.Sprintf("%s-core-%d", clusterName, number))}
-	return &r
-}
-
-func NewReadReplicaReleaseName(clusterName ReleaseName, number int) ReleaseName {
-	r := clusterMemberReleaseName{clusterName, releaseName(fmt.Sprintf("%s-read-replica-%d", clusterName, number))}
 	return &r
 }
 
@@ -129,6 +129,11 @@ func (r *clusterMemberReleaseName) DefaultConfigMapName() string {
 	return r.memberName.DefaultConfigMapName()
 }
 
+func (r *clusterMemberReleaseName) ShortName() string {
+	len := len(string(r.memberName)) / 2
+	return string(r.memberName)[0:len]
+}
+
 type Namespace string
 type PersistentDiskName string
 
@@ -160,11 +165,19 @@ var DefaultNeo4jBackupValues = Neo4jBackupValues{
 		ImageTag:                   strings.Split(os.Getenv("NEO4J_DOCKER_BACKUP_IMG"), ":")[1],
 		JobSchedule:                "* * * * *",
 		SuccessfulJobsHistoryLimit: 3,
-		FailedJobsHistoryLimit:     1,
-		BackoffLimit:               6,
+		FailedJobsHistoryLimit:     3,
+		BackoffLimit:               3,
 	},
 	TempVolume: map[string]interface{}{
 		"emptyDir": nil,
+	},
+	Resources: Neo4jBackupResources{
+		Requests: Neo4jBackupRequests{
+			EphemeralStorage: "2Gi",
+		},
+		Limits: Neo4jBackupLimits{
+			EphemeralStorage: "2Gi",
+		},
 	},
 	SecurityContext: SecurityContext{
 		RunAsNonRoot:        true,
@@ -172,6 +185,33 @@ var DefaultNeo4jBackupValues = Neo4jBackupValues{
 		RunAsGroup:          7474,
 		FsGroup:             7474,
 		FsGroupChangePolicy: "Always",
+	},
+	ContainerSecurityContext: ContainerSecurityContext{
+		RunAsNonRoot:             true,
+		RunAsUser:                7474,
+		RunAsGroup:               7474,
+		ReadOnlyRootFilesystem:   false,
+		AllowPrivilegeEscalation: false,
+		Capabilities: Capabilities{
+			Drop: []string{"ALL"},
+		},
+	},
+}
+
+var DefaultNeo4jReverseProxyValues = Neo4jReverseProxyValues{
+	ReverseProxy: ReverseProxy{
+		Image: os.Getenv("NEO4J_REVERSE_PROXY_IMG"),
+		Ingress: Ingress{
+			Enabled: true,
+			TLS: TLS{
+				Enabled: true,
+				Config: []Config{
+					{
+						SecretName: "ingress-secret",
+					},
+				},
+			},
+		},
 	},
 }
 

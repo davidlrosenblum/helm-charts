@@ -14,13 +14,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
-	"time"
-
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func init() {
@@ -170,6 +169,10 @@ func getSpecificPod(namespace model.Namespace, podName string) (*coreV1.Pod, err
 	return Clientset.CoreV1().Pods(string(namespace)).Get(context.TODO(), podName, v1.GetOptions{})
 }
 
+func getPodsWithSpecificLabel(namespace model.Namespace, label string) (*coreV1.PodList, error) {
+	return Clientset.CoreV1().Pods(string(namespace)).List(context.TODO(), v1.ListOptions{LabelSelector: label})
+}
+
 func getNodesList() (*coreV1.NodeList, error) {
 	return Clientset.CoreV1().Nodes().List(context.TODO(), v1.ListOptions{})
 }
@@ -265,7 +268,7 @@ func CheckExecInPod(t *testing.T, releaseName model.ReleaseName) error {
 		"id -u",
 	}
 
-	stdout, stderr, err := ExecInPod(releaseName, cmd)
+	stdout, stderr, err := ExecInPod(releaseName, cmd, "")
 
 	assert.NoError(t, err)
 	assert.Equal(t, "7474", stdout, "UID is different than expected")
@@ -274,13 +277,16 @@ func CheckExecInPod(t *testing.T, releaseName model.ReleaseName) error {
 	return err
 }
 
-func ExecInPod(releaseName model.ReleaseName, cmd []string) (string, string, error) {
-
+func ExecInPod(releaseName model.ReleaseName, cmd []string, podName string) (string, string, error) {
+	name := releaseName.PodName()
+	if podName != "" {
+		name = podName
+	}
 	var (
 		stdout bytes.Buffer
 		stderr bytes.Buffer
 	)
-	req := Clientset.CoreV1().RESTClient().Post().Resource("pods").Name(releaseName.PodName()).
+	req := Clientset.CoreV1().RESTClient().Post().Resource("pods").Name(name).
 		Namespace(string(releaseName.Namespace())).SubResource("exec")
 	option := &coreV1.PodExecOptions{
 		Command: cmd,

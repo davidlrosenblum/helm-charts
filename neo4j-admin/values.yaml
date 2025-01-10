@@ -9,7 +9,7 @@ disableLookups: false
 
 neo4j:
   image: "neo4j/helm-charts-backup"
-  imageTag: "5.10.0"
+  imageTag: "5.26.0"
   podLabels: {}
 #    app: "demo"
 #    acac: "dcdddc"
@@ -33,7 +33,9 @@ backup:
   # bucket: azure-storage-container
   bucketName: ""
 
-  #address details of the neo4j instance from which backup is to be done (serviceName or ip either one is required)
+  # Specify multiple backup endpoints as comma-separated string
+  # e.g. "10.3.3.2:6362,10.3.3.3:6362,10.3.3.4:6362"
+  databaseBackupEndpoints: ""
 
   #ex: standalone-admin.default.svc.cluster.local:6362
   # admin service name -  standalone-admin
@@ -53,11 +55,18 @@ backup:
   databaseBackupPort: ""
   #default value is cluster.local
   databaseClusterDomain: ""
+  # specify minio endpoint ex: http://demo.minio.svc.cluster.local:9000
+  # please ensure this endpoint is the s3 api endpoint or else the backup helm chart will fail
+  # as of now it works only with non tls endpoints
+  # to be used only when aws is used as cloudProvider
+  minioEndpoint: ""
 
   #name of the database to backup ex: neo4j or neo4j,system (You can provide command separated database names)
   # In case of comma separated databases failure of any single database will lead to failure of complete operation
   database: ""
   # cloudProvider can be either gcp, aws, or azure
+  # if cloudProvider is empty then the backup will be done to the /backups mount.
+  # the /backups mount can point to a persistentVolume based on the definition set in tempVolume
   cloudProvider: ""
 
   # name of the kubernetes secret containing the respective cloud provider credentials
@@ -84,6 +93,11 @@ backup:
   secretName: ""
   # provide the keyname used in the above secret
   secretKeyName: ""
+  # provide the azure storage account name
+  # this to be provided when you are using workload identity integration for azure
+  azureStorageAccountName: ""
+  #setting this to true will not delete the backup files generated at the /backup mount
+  keepBackupFiles: true
 
   #Below are all neo4j-admin database backup flags / options
   #To know more about the flags read here : https://neo4j.com/docs/operations-manual/current/backup-restore/online-backup/
@@ -94,6 +108,20 @@ backup:
   parallelRecovery: false
   verbose: true
   heapSize: ""
+
+  # https://neo4j.com/docs/operations-manual/current/backup-restore/aggregate/
+  # Performs aggregate backup. If enabled, NORMAL BACKUP WILL NOT BE DONE only aggregate backup
+  # fromPath supports only s3 or local mount. For s3 , please set cloudProvider to aws and use either serviceAccount or creds
+  aggregate:
+    enabled: false
+    verbose: true
+    keepOldBackup: false
+    parallelRecovery: false
+    # Only AWS S3 or local mount paths are supported
+    # For S3 provide the complete path , Ex: s3://bucket1/bucket2
+    fromPath: ""
+    # database name to aggregate. Can contain * and ? for globbing.
+    database: ""
 
 #Below are all neo4j-admin database check flags / options
 #To know more about the flags read here : https://neo4j.com/docs/operations-manual/current/tools/neo4j-admin/consistency-checker/
@@ -112,6 +140,10 @@ consistencyCheck:
   verbose: true
 
 # Set to name of an existing Service Account to use if desired
+# Follow the following links for setting up a service account with workload identity
+# Azure - https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview?tabs=go
+# GCP - https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
+# AWS - https://docs.aws.amazon.com/eks/latest/userguide/associate-service-account-role.html
 serviceAccountName: ""
 
 # Volume to use as temporary storage for files before they are uploaded to cloud. For large databases local storage may not have sufficient space.
@@ -129,12 +161,25 @@ securityContext:
   fsGroup: 7474
   fsGroupChangePolicy: "Always"
 
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 7474
+  runAsGroup: 7474
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
 # default ephemeral storage of backup container
 resources:
   requests:
     ephemeralStorage: "4Gi"
+    cpu: ""
+    memory: ""
   limits:
     ephemeralStorage: "5Gi"
+    cpu: ""
+    memory: ""
 
 # nodeSelector labels
 # please ensure the respective labels are present on one of nodes or else helm charts will throw an error
@@ -175,3 +220,4 @@ tolerations: []
 #    operator: "Equal"
 #    value: "value2"
 #    effect: "NoSchedule"
+

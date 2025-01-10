@@ -1,10 +1,13 @@
 package neo4j_admin
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // CheckDatabaseConnectivity checks if there is connectivity with the provided backup instance or not
@@ -23,39 +26,74 @@ func CheckDatabaseConnectivity(hostPort string) error {
 }
 
 // PerformBackup performs the backup operation and returns the generated backup file name
-func PerformBackup(address string, database string) (string, error) {
-	flags := getBackupCommandFlags(address, database)
+func PerformBackup(address string) ([]string, error) {
+
+	databases := strings.ReplaceAll(os.Getenv("DATABASE"), ",", " ")
+	flags := getBackupCommandFlags(address)
 	log.Printf("Printing backup flags %v", flags)
+	dir, _ := os.Getwd()
+	log.Println("current directory", dir)
 	output, err := exec.Command("neo4j-admin", flags...).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("Backup Failed for database %s !! output = %s \n err = %v", database, string(output), err)
+		return nil, fmt.Errorf("Backup Failed for database %s !! output = %s \n err = %v", databases, string(output), err)
 	}
-	log.Printf("Backup Completed for database %s !!", database)
-	fileName, err := retrieveBackupFileName(string(output))
+	log.Printf("Backup Completed for database %s !!", databases)
+	backupFileNames, err := retrieveBackupFileNames(string(output))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return strings.TrimSpace(fileName), nil
+	return backupFileNames, nil
 }
 
 // PerformConsistencyCheck performs the consistency check on the backup taken and returns the generated report tar name
-func PerformConsistencyCheck(backupFileName string, database string) (string, error) {
-	flags := getConsistencyCheckCommandFlags(backupFileName, database)
+func PerformConsistencyCheck(database string) (string, error) {
+	timeStamp := time.Now().Format("2006-01-02T15-04-05")
+	fileName := fmt.Sprintf("%s-%s.backup", database, timeStamp)
+	flags := getConsistencyCheckCommandFlags(fileName, database)
 	log.Printf("Printing consistency check flags %v", flags)
 	output, err := exec.Command("neo4j-admin", flags...).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("Consistency Check Failed for database %s!! \n output = %s \n err = %v", database, string(output), err)
+	if err == nil {
+		log.Printf("No inconsistencies found for %s database !! No Inconsistency report generated.", database)
+		return "", nil
 	}
-	log.Printf("Consistency Check Completed. Report Name %s !!", string(output))
 
-	tarFileName := fmt.Sprintf("/backups/%s.report.tar.gz", backupFileName)
-	directoryName := fmt.Sprintf("/backups/%s.report", backupFileName)
-	log.Printf("tarfileName %s directoryName %s", tarFileName, directoryName)
-	output, err = exec.Command("tar", "-czvf", tarFileName, directoryName, "--absolute-names").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("Unable to create a tar archive of consistency check report for database %s !! \n output = %s \n err = %v", database, string(output), err)
+	var me *exec.ExitError
+	if errors.As(err, &me) {
+		log.Printf("Inconsistencies found for %s database. Exit code was %d\n", database, me.ExitCode())
+		log.Printf("Consistency Check Completed !!")
+
+		tarFileName := fmt.Sprintf("/backups/%s.report.tar.gz", fileName)
+		directoryName := fmt.Sprintf("/backups/%s.report", fileName)
+		log.Printf("tarfileName %s directoryName %s", tarFileName, directoryName)
+		_, err = exec.Command("tar", "-czvf", tarFileName, directoryName, "--absolute-names").CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("Unable to create a tar archive of consistency check report for database %s !! \n output = %s \n err = %v", database, string(output), err)
+		}
+		log.Printf("Consistency Check Report tar archive created for database %s at %s !!", database, tarFileName)
+		return fmt.Sprintf("%s.report.tar.gz", fileName), nil
 	}
-	log.Printf("Consistency Check Report tar archive created for database %s at %s !!", database, tarFileName)
+	return "", fmt.Errorf("Consistency Check Failed for database %s!! \n output = %s \n err = %v", database, string(output), err)
+}
 
-	return fmt.Sprintf("%s.report.tar.gz", backupFileName), nil
+// PerformAggregateBackup triggers the neo4j-admin aggregate backup command
+func PerformAggregateBackup() error {
+	flags := getAggregateBackupCommandFlags()
+	database := os.Getenv("AGGREGATE_BACKUP_DATABASE")
+	log.Println("Printing aggregate backup flags %v", flags)
+	dir, _ := os.Getwd()
+	log.Println("current directory", dir)
+	output, err := exec.Command("neo4j-admin", flags...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("Aggregate Backup Failed for database %s !! output = %s \n err = %v", database, string(output), err)
+	}
+	log.Printf("Aggregate Backup Completed for database %s !!", database)
+	if !strings.Contains(string(output), "no need to aggregate") {
+		backupFileNames, err := retrieveAggregatedBackupFileNames(string(output))
+		if err != nil {
+			return err
+		}
+		log.Printf("%s", backupFileNames)
+	}
+	log.Printf(string(output))
+	return nil
 }

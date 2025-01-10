@@ -8,23 +8,51 @@ import (
 )
 
 // getBackupCommandFlags returns a slice of string containing all the flags to be passed with the neo4j-admin backup command
-func getBackupCommandFlags(address string, database string) []string {
+func getBackupCommandFlags(address string) []string {
 	flags := []string{"database", "backup"}
-	flags = append(flags, fmt.Sprintf("--from=%s", address))
+
+	// Split address into multiple endpoints if comma-separated
+	endpoints := strings.Split(address, ",")
+	for _, endpoint := range endpoints {
+		flags = append(flags, fmt.Sprintf("--from=%s", strings.TrimSpace(endpoint)))
+	}
+
 	flags = append(flags, fmt.Sprintf("--include-metadata=%s", os.Getenv("INCLUDE_METADATA")))
 	flags = append(flags, fmt.Sprintf("--keep-failed=%s", os.Getenv("KEEP_FAILED")))
 	flags = append(flags, fmt.Sprintf("--parallel-recovery=%s", os.Getenv("PARALLEL_RECOVERY")))
 	flags = append(flags, fmt.Sprintf("--type=%s", os.Getenv("TYPE")))
 	flags = append(flags, fmt.Sprintf("--to-path=%s", "/backups"))
+
 	if len(strings.TrimSpace(os.Getenv("PAGE_CACHE"))) > 0 {
 		flags = append(flags, fmt.Sprintf("--pagecache=%s", os.Getenv("PAGE_CACHE")))
 	}
+
+	if os.Getenv("VERBOSE") == "true" {
+		flags = append(flags, "--verbose")
+	}
+
+	for _, db := range strings.Split(os.Getenv("DATABASE"), ",") {
+		flags = append(flags, strings.TrimSpace(db))
+	}
+
+	return flags
+}
+
+// getAggregateBackupCommandFlags returns a slice of string containing all the flags to be passed with the neo4j-admin aggregate backup command
+func getAggregateBackupCommandFlags() []string {
+	database := os.Getenv("AGGREGATE_BACKUP_DATABASE")
+	flags := []string{"database", "aggregate-backup"}
+	flags = append(flags, fmt.Sprintf("--from-path=%s", os.Getenv("AGGREGATE_BACKUP_FROM_PATH")))
+	flags = append(flags, fmt.Sprintf("--keep-old-backup=%s", os.Getenv("AGGREGATE_BACKUP_KEEPOLDBACKUP")))
+	flags = append(flags, fmt.Sprintf("--parallel-recovery=%s", os.Getenv("AGGREGATE_BACKUP_PARALLEL_RECOVERY")))
+
 	//flags = append(flags, "--expand-commands")
 	if os.Getenv("VERBOSE") == "true" {
 		flags = append(flags, "--verbose")
 	}
-	flags = append(flags, database)
-
+	for _, db := range strings.Split(database, ",") {
+		flags = append(flags, fmt.Sprintf("%s", db))
+	}
 	return flags
 }
 
@@ -38,14 +66,14 @@ func getBackupCommandFlags(address string, database string) []string {
 //	maxOffHeapMemory: ""
 //	threads: ""
 //	verbose: true
-func getConsistencyCheckCommandFlags(backupFileName string, database string) []string {
+func getConsistencyCheckCommandFlags(fileName string, database string) []string {
 	flags := []string{"database", "check"}
 
 	flags = append(flags, fmt.Sprintf("--check-indexes=%s", os.Getenv("CONSISTENCY_CHECK_INDEXES")))
 	flags = append(flags, fmt.Sprintf("--check-graph=%s", os.Getenv("CONSISTENCY_CHECK_GRAPH")))
 	flags = append(flags, fmt.Sprintf("--check-counts=%s", os.Getenv("CONSISTENCY_CHECK_COUNTS")))
 	flags = append(flags, fmt.Sprintf("--check-property-owners=%s", os.Getenv("CONSISTENCY_CHECK_PROPERTYOWNERS")))
-	flags = append(flags, fmt.Sprintf("--report-path=/backups/%s.report", backupFileName))
+	flags = append(flags, fmt.Sprintf("--report-path=/backups/%s.report", fileName))
 	flags = append(flags, fmt.Sprintf("--from-path=/backups"))
 	if len(strings.TrimSpace(os.Getenv("CONSISTENCY_CHECK_THREADS"))) > 0 {
 		flags = append(flags, fmt.Sprintf("--threads=%s", os.Getenv("CONSISTENCY_CHECK_THREADS")))
@@ -62,14 +90,29 @@ func getConsistencyCheckCommandFlags(backupFileName string, database string) []s
 	return flags
 }
 
-// retrieveBackupFileName takes the backup command output and looks for the below string and retrieves the backup file names
-// Finished artifact creation 'neo4j-2023-05-04T17-21-27.backup' for database 'neo4j', took 121ms.
-func retrieveBackupFileName(cmdOutput string) (string, error) {
+// retrieveBackupFileNames takes the backup command output and looks for the below string and retrieves the backup file names
+// Ex: Finished artifact creation 'neo4j-2023-05-04T17-21-27.backup' for database 'neo4j', took 121ms.
+func retrieveBackupFileNames(cmdOutput string) ([]string, error) {
 	re := regexp.MustCompile(`Finished artifact creation (.*).backup`)
-	matches := re.FindStringSubmatch(cmdOutput)
-	if !(len(matches) > 1) {
-		return "", fmt.Errorf("regex failed !! cannot retrieve backup file name \n %v", matches)
+	matches := re.FindAllStringSubmatch(cmdOutput, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("regex failed !! cannot retrieve backup file name \n %v", matches)
 	}
-	backupFileName := fmt.Sprintf("%s.backup", matches[1])
-	return strings.Replace(backupFileName, "'", "", -1), nil
+	var backupFileNames []string
+	for _, match := range matches {
+		name := strings.Replace(match[1], "'", "", -1)
+		backupFileNames = append(backupFileNames, fmt.Sprintf("%s.backup", name))
+	}
+	return backupFileNames, nil
+}
+
+// retrieveAggregatedBackupFileNames takes the output of aggregate backup command and returns the list of succesfully backup chain statements
+// Ex: Successfully aggregated backup chain of database 'neo4j2', new artifact: '/var/lib/neo4j/bin/backup/neo4j2-2024-06-13T12-43-43.backup'.
+func retrieveAggregatedBackupFileNames(cmdOutput string) ([]string, error) {
+	re := regexp.MustCompile(`Successfully aggregated backup chain(.*)`)
+	matches := re.FindAllString(cmdOutput, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("regex failed !! cannot retrieve aggregated backup file name \n %v \n %s", matches, cmdOutput)
+	}
+	return matches, nil
 }
