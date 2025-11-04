@@ -1,36 +1,103 @@
 package model
 
-import v1 "k8s.io/api/core/v1"
-
 type HelmValues struct {
-	FullnameOverride         string            `yaml:"fullnameOverride,omitempty"`
-	NameOverride             string            `yaml:"nameOverride,omitempty"`
-	Neo4J                    Neo4J             `yaml:"neo4j,omitempty"`
-	Volumes                  Volumes           `yaml:"volumes,omitempty"`
-	AdditionalVolumes        []interface{}     `yaml:"additionalVolumes,omitempty"`
-	AdditionalVolumeMounts   []interface{}     `yaml:"additionalVolumeMounts,omitempty"`
-	NodeSelector             map[string]string `yaml:"nodeSelector,omitempty"`
-	DisableLookups           bool              `default:"false" yaml:"disableLookups"`
-	Services                 Services          `yaml:"services,omitempty"`
-	Config                   map[string]string `yaml:"config,omitempty"`
-	SecurityContext          SecurityContext   `yaml:"securityContext,omitempty"`
-	ContainerSecurityContext SecurityContext   `yaml:"containerSecurityContext,omitempty"`
-	ReadinessProbe           ReadinessProbe    `yaml:"readinessProbe,omitempty"`
-	LivenessProbe            LivenessProbe     `yaml:"livenessProbe,omitempty"`
-	StartupProbe             StartupProbe      `yaml:"startupProbe,omitempty"`
-	Ssl                      Ssl               `yaml:"ssl,omitempty"`
-	ClusterDomain            string            `yaml:"clusterDomain,omitempty"`
-	Image                    Image             `yaml:"image,omitempty"`
-	Statefulset              Statefulset       `yaml:"statefulset,omitempty"`
-	Env                      Env               `yaml:"env,omitempty"`
-	PodSpec                  v1.PodSpec        `yaml:"podSpec,omitempty"`
-	LogInitialPassword       bool              `yaml:"logInitialPassword,omitempty"`
-	Jvm                      Jvm               `yaml:"jvm,omitempty"`
-	Logs                     Logging           `yaml:"logs,omitempty"`
-	LdapPasswordFromSecret   string            `yaml:"ldapPasswordFromSecret,omitempty"`
-	LdapPasswordMountPath    string            `yaml:"ldapPasswordMountPath,omitempty"`
-	ApocCredentials          ApocCredentials   `yaml:"apoc_credentials,omitempty"`
+	FullnameOverride         string              `yaml:"fullnameOverride,omitempty"`
+	NameOverride             string              `yaml:"nameOverride,omitempty"`
+	Neo4J                    Neo4J               `yaml:"neo4j,omitempty"`
+	Volumes                  Volumes             `yaml:"volumes,omitempty"`
+	AdditionalVolumes        []interface{}       `yaml:"additionalVolumes,omitempty"`
+	AdditionalVolumeMounts   []interface{}       `yaml:"additionalVolumeMounts,omitempty"`
+	NodeSelector             map[string]string   `yaml:"nodeSelector,omitempty"`
+	DisableLookups           bool                `default:"false" yaml:"disableLookups"`
+	Services                 Services            `yaml:"services,omitempty"`
+	Config                   map[string]string   `yaml:"config,omitempty"`
+	SecurityContext          SecurityContext     `yaml:"securityContext,omitempty"`
+	ContainerSecurityContext SecurityContext     `yaml:"containerSecurityContext,omitempty"`
+	ReadinessProbe           ReadinessProbe      `yaml:"readinessProbe,omitempty"`
+	LivenessProbe            LivenessProbe       `yaml:"livenessProbe,omitempty"`
+	StartupProbe             StartupProbe        `yaml:"startupProbe,omitempty"`
+	Ssl                      Ssl                 `yaml:"ssl,omitempty"`
+	ClusterDomain            string              `yaml:"clusterDomain,omitempty"`
+	Image                    Image               `yaml:"image,omitempty"`
+	Statefulset              Statefulset         `yaml:"statefulset,omitempty"`
+	Env                      Env                 `yaml:"env,omitempty"`
+	PodSpec                  PodSpec             `yaml:"podSpec,omitempty"`
+	LogInitialPassword       bool                `yaml:"logInitialPassword,omitempty"`
+	Jvm                      Jvm                 `yaml:"jvm,omitempty"`
+	Logs                     Logging             `yaml:"logs,omitempty"`
+	LdapPasswordFromSecret   string              `yaml:"ldapPasswordFromSecret,omitempty"`
+	LdapPasswordMountPath    string              `yaml:"ldapPasswordMountPath,omitempty"`
+	ApocCredentials          ApocCredentials     `yaml:"apoc_credentials,omitempty"`
+	PodDisruptionBudget      PodDisruptionBudget `yaml:"podDisruptionBudget"`
+	ServiceMonitor           ServiceMonitor      `yaml:"serviceMonitor"`
+	Analytics                Analytics           `yaml:"analytics"`
 }
+
+type Operations struct {
+	EnableServer bool              `yaml:"enableServer"`
+	Image        string            `yaml:"image"`
+	Protocol     string            `yaml:"protocol"`
+	Labels       map[string]string `yaml:"labels"`
+}
+
+type Analytics struct {
+	Enabled bool `yaml:"enabled"`
+	Type    Type `yaml:"type"`
+}
+
+type Type struct {
+	Name string `yaml:"name"`
+}
+
+type ServiceMonitor struct {
+	Enabled           bool                   `yaml:"enabled"`
+	Labels            map[string]string      `yaml:"labels,omitempty"`
+	JobLabel          string                 `yaml:"jobLabel,omitempty"`
+	Interval          string                 `yaml:"interval,omitempty"`
+	Port              string                 `yaml:"port,omitempty"`
+	Path              string                 `yaml:"path,omitempty"`
+	NamespaceSelector NamespaceSelector      `yaml:"namespaceSelector"`
+	TargetLabels      []string               `yaml:"targetLabels,omitempty"`
+	Selector          ServiceMonitorSelector `yaml:"selector,omitempty"`
+}
+
+type ServiceMonitorSelector struct {
+	MatchLabels map[string]string `yaml:"matchLabels,omitempty"`
+}
+type NamespaceSelector struct {
+	Any        bool     `yaml:"any"`
+	MatchNames []string `yaml:"matchNames,omitempty"`
+}
+
+type PodDisruptionBudget struct {
+	Enabled          bool               `yaml:"enabled"`
+	MatchLabels      map[string]string  `yaml:"matchLabels,omitempty"`
+	MatchExpressions []MatchExpressions `yaml:"matchExpressions,omitempty"`
+	Labels           map[string]string  `yaml:"labels,omitempty"`
+	MinAvailable     string             `yaml:"minAvailable,omitempty"`
+	MaxUnavailable   string             `yaml:"maxUnavailable,omitempty"`
+}
+type PodSpec struct {
+	Annotations                   map[string]string          `yaml:"annotations,omitempty"`
+	NodeAffinity                  map[string]interface{}     `yaml:"nodeAffinity,omitempty"`
+	PodAntiAffinity               interface{}                `yaml:"podAntiAffinity,omitempty"`
+	Tolerations                   []interface{}              `yaml:"tolerations,omitempty"`
+	PriorityClassName             string                     `yaml:"priorityClassName,omitempty"`
+	DNSPolicy                     string                     `yaml:"dnsPolicy,omitempty"`
+	Loadbalancer                  string                     `yaml:"loadbalancer,omitempty"`
+	ServiceAccountName            string                     `yaml:"serviceAccountName,omitempty"`
+	TerminationGracePeriodSeconds int                        `yaml:"terminationGracePeriodSeconds,omitempty"`
+	InitContainers                []interface{}              `yaml:"initContainers,omitempty"`
+	Containers                    []interface{}              `yaml:"containers,omitempty"`
+	TopologySpreadConstraints     []TopologySpreadConstraint `yaml:"topologySpreadConstraints,omitempty"`
+}
+
+type TopologySpreadConstraint struct {
+	MaxSkew           int    `yaml:"maxSkew"`
+	TopologyKey       string `yaml:"topologyKey"`
+	WhenUnsatisfiable string `yaml:"whenUnsatisfiable"`
+}
+
 type ApocCredentials struct {
 	Jdbc          map[string]string `yaml:"jdbc,omitempty"`
 	Elasticsearch map[string]string `yaml:"elasticsearch,omitempty"`
@@ -50,6 +117,7 @@ type Neo4J struct {
 	OfflineMaintenanceModeEnabled bool        `yaml:"offlineMaintenanceModeEnabled,omitempty"`
 	Resources                     Resources   `yaml:"resources,omitempty"`
 	Labels                        interface{} `yaml:"labels,omitempty"`
+	Operations                    Operations  `yaml:"operations,omitempty"`
 }
 type Requests struct {
 	Storage string `yaml:"storage,omitempty"`
@@ -141,15 +209,16 @@ type Spec struct {
 	Type string `yaml:"type,omitempty"`
 }
 type Port struct {
-	Enabled    bool   `yaml:"enabled,omitempty"`
+	Enabled    bool   `yaml:"enabled"`
 	Port       int    `yaml:"port"`
 	TargetPort int    `yaml:"targetPort"`
+	NodePort   int    `yaml:"nodePort"`
 	Name       string `yaml:"name"`
 }
 
 type Ports struct {
-	HTTP   Port `yaml:"http,omitempty"`
-	HTTPS  Port `yaml:"https,omitempty"`
+	HTTP   Port `yaml:"http"`
+	HTTPS  Port `yaml:"https"`
 	Bolt   Port `yaml:"bolt,omitempty"`
 	Backup Port `yaml:"backup,omitempty"`
 }
@@ -160,7 +229,7 @@ type Neo4jService struct {
 	Enabled      bool              `yaml:"enabled,omitempty" default:"true"`
 	Annotations  map[string]string `yaml:"annotations,omitempty"`
 	Spec         Spec              `yaml:"spec,omitempty"`
-	Ports        Ports             `yaml:"ports,omitempty"`
+	Ports        Ports             `yaml:"ports"`
 	Selector     ServiceSelector   `yaml:"selector,omitempty"`
 	MultiCluster bool              `yaml:"multiCluster,omitempty"`
 }
@@ -181,12 +250,20 @@ type Services struct {
 }
 
 type SecurityContext struct {
-	RunAsNonRoot        bool   `yaml:"runAsNonRoot,omitempty"`
-	RunAsUser           int    `yaml:"runAsUser,omitempty"`
-	RunAsGroup          int    `yaml:"runAsGroup,omitempty"`
-	FsGroup             int    `yaml:"fsGroup,omitempty"`
-	FsGroupChangePolicy string `yaml:"fsGroupChangePolicy,omitempty"`
+	RunAsNonRoot             bool         `yaml:"runAsNonRoot,omitempty"`
+	RunAsUser                int          `yaml:"runAsUser,omitempty"`
+	RunAsGroup               int          `yaml:"runAsGroup,omitempty"`
+	FsGroup                  int          `yaml:"fsGroup,omitempty"`
+	FsGroupChangePolicy      string       `yaml:"fsGroupChangePolicy,omitempty"`
+	ReadOnlyRootFilesystem   bool         `yaml:"readOnlyRootFilesystem,omitempty"`
+	AllowPrivilegeEscalation bool         `yaml:"allowPrivilegeEscalation,omitempty"`
+	Capabilities             Capabilities `yaml:"capabilities,omitempty"`
 }
+
+type Capabilities struct {
+	Drop []string `yaml:"drop,omitempty"`
+}
+
 type ReadinessProbe struct {
 	FailureThreshold int `yaml:"failureThreshold,omitempty"`
 	TimeoutSeconds   int `yaml:"timeoutSeconds,omitempty"`
@@ -245,18 +322,6 @@ type Statefulset struct {
 type Env struct {
 }
 
-type PodSpec struct {
-	Annotations                   map[string]string `yaml:"annotations,omitempty"`
-	NodeAffinity                  v1.NodeAffinity   `yaml:"nodeAffinity,omitempty"`
-	PodAntiAffinity               bool              `yaml:"podAntiAffinity,omitempty"`
-	Tolerations                   []v1.Toleration   `yaml:"tolerations,omitempty"`
-	PriorityClassName             string            `yaml:"priorityClassName,omitempty"`
-	Loadbalancer                  string            `yaml:"loadbalancer,omitempty"`
-	ServiceAccountName            string            `yaml:"serviceAccountName,omitempty"`
-	TerminationGracePeriodSeconds int               `yaml:"terminationGracePeriodSeconds,omitempty"`
-	InitContainers                []v1.Container    `yaml:"initContainers,omitempty"`
-	Containers                    []v1.Container    `yaml:"containers,omitempty"`
-}
 type Jvm struct {
 	UseNeo4JDefaultJvmArguments bool     `yaml:"useNeo4jDefaultJvmArguments,omitempty"`
 	AdditionalJvmArguments      []string `yaml:"additionalJvmArguments,omitempty"`
@@ -264,4 +329,8 @@ type Jvm struct {
 type Logging struct {
 	ServerLogsXML string `yaml:"serverLogsXml,omitempty"`
 	UserLogsXML   string `yaml:"userLogsXml,omitempty"`
+}
+
+type PodAntiAffinity struct {
+	RequiredDuringSchedulingIgnoredDuringExecution []RequiredDuringSchedulingIgnoredDuringExecution `yaml:"requiredDuringSchedulingIgnoredDuringExecution"`
 }

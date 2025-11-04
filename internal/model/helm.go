@@ -215,10 +215,14 @@ func HelmTemplateFromStruct(t *testing.T, chart HelmChartBuilder, values interfa
 
 	var helmValues []byte
 	var err error
-	if chart.Name() == "neo4j-admin" {
-		helmValues, err = yaml.Marshal(values.(Neo4jBackupValues))
-		log.Printf("%v", err)
-	} else {
+	switch chart.Name() {
+	case "neo4j-admin":
+		helmValues, _ = yaml.Marshal(values.(Neo4jBackupValues))
+	case "neo4j-reverse-proxy":
+		helmValues, _ = yaml.Marshal(values.(Neo4jReverseProxyValues))
+	case "neo4j-loadbalancer":
+		helmValues, _ = yaml.Marshal(values.(Neo4jLoadBalancerValues))
+	default:
 		helmValues, _ = yaml.Marshal(values.(HelmValues))
 	}
 
@@ -236,20 +240,24 @@ func HelmTemplateFromStruct(t *testing.T, chart HelmChartBuilder, values interfa
 		io.WriteString(stdin, string(helmValues))
 	}()
 
-	stdErrOut, err := cmd.CombinedOutput()
+	stdout, stderr, err := RunCommand(cmd)
+	//stdErrOut, err := cmd.CombinedOutput()
 	t.Logf("Running %s\n", cmd.Args)
 	t.Logf("With StdIn:\n%s\n", helmValues)
 	if err != nil {
-		return nil, multierror.Append(errors.New("Error running helm template"), err, fmt.Errorf(string(stdErrOut)))
+		return nil, multierror.Append(errors.New("Error running helm template"), err, fmt.Errorf(string(stderr)))
 	}
-	return decodeK8s(stdErrOut)
+	return decodeK8s(stdout)
 }
 
 func (c *HelmClient) Install(t *testing.T, releaseName string, namespace string, values interface{}) (string, error) {
 	var helmValues []byte
-	if c.chartName == "neo4j-admin" {
+	switch c.chartName {
+	case "neo4j-admin":
 		helmValues, _ = yaml.Marshal(values.(Neo4jBackupValues))
-	} else {
+	case "neo4j-reverse-proxy":
+		helmValues, _ = yaml.Marshal(values.(Neo4jReverseProxyValues))
+	default:
 		helmValues, _ = yaml.Marshal(values.(HelmValues))
 	}
 	helmArgs := []string{

@@ -1,7 +1,7 @@
 apiVersion: v1
 name: neo4j-persistent-volume
 home: https://www.neo4j.com
-version: 5.10.0
+version: 5.26.0
 appVersion: "-"
 description: Sets up persistent disks suitable for a Neo4j Helm installation
 keywords:
@@ -15,5 +15,3 @@ sources:
 maintainers:
   - name: bfeshti
     email: bledi.feshti@neotechnology.com
-  - name: harshitsinghvi22
-    email: harshit.singhvi@neotechnology.com

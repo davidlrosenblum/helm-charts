@@ -5,16 +5,21 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/neo4j/helm-charts/internal/helpers"
-	"github.com/neo4j/helm-charts/internal/model"
-	"github.com/neo4j/helm-charts/internal/resources"
-	"github.com/stretchr/testify/assert"
-	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
+	v12 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/neo4j/helm-charts/internal/helpers"
+	"github.com/neo4j/helm-charts/internal/model"
+	"github.com/neo4j/helm-charts/internal/resources"
+	pv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 var acceptLicenseAgreement = []string{"--set", "neo4j.acceptLicenseAgreement=yes"}
@@ -251,6 +256,68 @@ func TestEnterpriseContainsDefaultBackupAddress(t *testing.T) {
 		}
 
 	})
+}
+
+// TestNeo4jBackupPorts checks for backup ports in the services when backup disabled and enabled
+func TestNeo4jBackupPorts(t *testing.T) {
+	t.Parallel()
+
+	var helmValues model.HelmValues
+
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		if edition == "community" {
+			helmValues = model.DefaultCommunityValues
+			manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues)
+			assert.NoError(t, err, "error while testing backup ports when backup is enabled")
+			statefulSet := manifest.OfTypeWithName(&appsv1.StatefulSet{}, model.DefaultHelmTemplateReleaseName.String())
+			assert.NotNil(t, statefulSet, fmt.Sprintf("no statefulset found with name %s", model.DefaultHelmTemplateReleaseName))
+
+			ports := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Containers[0].Ports
+			for _, port := range ports {
+				assert.NotEqual(t, port.Name, "backup", "found backup port name in statefulset when backup is disabled")
+				assert.NotEqual(t, port.ContainerPort, int32(6362), "found backup port in statefulset when backup is disabled")
+			}
+		} else {
+			helmValues = model.DefaultEnterpriseValues
+			manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues)
+			assert.NoError(t, err, "error while testing backup ports when backup is enabled")
+
+			services := manifest.OfType(&v1.Service{})
+			for _, service := range services {
+				svcPorts := service.(*v1.Service).Spec.Ports
+				for _, port := range svcPorts {
+					if port.Name == "tcp-backup" {
+						assert.Equal(t, port.Port, int32(6362), fmt.Sprintf("Backup Port found %d is not matching with 6362", port.Port))
+						assert.Equal(t, port.TargetPort.IntValue(), 6362, fmt.Sprintf("Backup Target Port found %d is not matching with 6362", port.TargetPort.IntVal))
+					}
+				}
+			}
+
+			neo4jConfigs := make(map[string]string, 1)
+			neo4jConfigs["server.backup.enabled"] = "false"
+			helmValues.Config = neo4jConfigs
+			manifest, err = model.HelmTemplateFromStruct(t, chart, helmValues)
+			assert.NoError(t, err, "error while testing backup ports when backup is disabled")
+
+			services = manifest.OfType(&v1.Service{})
+			for _, service := range services {
+				svcPorts := service.(*v1.Service).Spec.Ports
+				for _, port := range svcPorts {
+					assert.NotEqual(t, port.Name, "tcp-backup", "found backup port when backup is disabled")
+				}
+			}
+
+			statefulSet := manifest.OfTypeWithName(&appsv1.StatefulSet{}, model.DefaultHelmTemplateReleaseName.String())
+			assert.NotNil(t, statefulSet, fmt.Sprintf("no statefulset found with name %s", model.DefaultHelmTemplateReleaseName))
+
+			ports := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Containers[0].Ports
+			for _, port := range ports {
+				assert.NotEqual(t, port.Name, "backup", "found backup port name in statefulset when backup is disabled")
+				assert.NotEqual(t, port.ContainerPort, int32(6362), "found backup port in statefulset when backup is disabled")
+			}
+		}
+
+	}))
 }
 
 func TestAdditionalEnvVars(t *testing.T) {
@@ -556,7 +623,7 @@ func TestPasswordFromExistingSecretWithLookupDisabled(t *testing.T) {
 			return
 		}
 		neo4jContainer := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Containers[0]
-		assert.Contains(t, neo4jContainer.EnvFrom, v1.EnvFromSource{
+		assert.NotContains(t, neo4jContainer.EnvFrom, v1.EnvFromSource{
 			SecretRef: &v1.SecretEnvSource{
 				LocalObjectReference: v1.LocalObjectReference{Name: "test-secret"},
 			},
@@ -614,26 +681,19 @@ func TestNeo4jPodAnnotations(t *testing.T) {
 		}
 
 		manifest, err := model.HelmTemplate(t, chart, helmTemplateArgs)
-		if !assert.NoError(t, err) {
-			return
-		}
+		assert.NoError(t, err)
 
 		statefulSet := manifest.OfTypeWithName(&appsv1.StatefulSet{}, model.DefaultHelmTemplateReleaseName.String())
-		if !assert.NotNil(t, statefulSet, fmt.Sprintf("no statefulset found with name %s", model.DefaultHelmTemplateReleaseName)) {
-			return
-		}
+		assert.NotNil(t, statefulSet, fmt.Sprintf("no statefulset found with name %s", model.DefaultHelmTemplateReleaseName))
+
 		podAnnotations := statefulSet.(*appsv1.StatefulSet).Spec.Template.Annotations
-		if !assert.NotNil(t, podAnnotations, "no pod annotations found") {
-			return
-		}
+		assert.NotNil(t, podAnnotations, "no pod annotations found")
 
-		if !assert.Contains(t, podAnnotations, "demoKey", "missing podAnnotation demoKey") {
-			return
-		}
+		assert.Contains(t, podAnnotations, "demoKey", "missing podAnnotation demoKey")
 
-		if !assert.Equal(t, podAnnotations["demoKey"], "alpha", "invalid podAnnotation value for key=demoKey") {
-			return
-		}
+		assert.Equal(t, podAnnotations["demoKey"], "alpha", "invalid podAnnotation value for key=demoKey")
+
+		assert.Contains(t, podAnnotations, fmt.Sprintf("checksum/%s-env", model.DefaultHelmTemplateReleaseName.String()), "missing env checksum")
 
 	}))
 }
@@ -684,7 +744,7 @@ func TestNeo4jStatefulSetAnnotations(t *testing.T) {
 	}))
 }
 
-// TestNeo4jPodPriorityClassName checks for Neo4j PriorityClassName
+// TestNeo4jPodPriorityClassName checks for Neo4j PriorityClassNamePrefix
 // error should be thrown since we are not creating priorityClass in the cluster in advance
 func TestNeo4jPodPriorityClassName(t *testing.T) {
 	t.Parallel()
@@ -717,7 +777,7 @@ func TestNeo4jPodPriorityClassName(t *testing.T) {
 	}))
 }
 
-// TestNeo4jPodPriorityClassNameWithLookupDisabled checks for Neo4j PriorityClassName with disableLookups flag set to true
+// TestNeo4jPodPriorityClassNameWithLookupDisabled checks for Neo4j PriorityClassNamePrefix with disableLookups flag set to true
 func TestNeo4jPodPriorityClassNameWithLookupDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -817,6 +877,53 @@ func TestNeo4jPodNodeAffinity(t *testing.T) {
 	}))
 }
 
+// TestNeo4jPodAntiAffinity checks for podAntiAffinity setting in statefulset
+func TestNeo4jPodAntiAffinity(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultEnterpriseValues
+
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		if edition == "community" {
+			helmValues = model.DefaultCommunityValues
+		}
+		helmValues.PodSpec.PodAntiAffinity = model.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []model.RequiredDuringSchedulingIgnoredDuringExecution{
+				{
+					LabelSelector: model.LabelSelector{
+						MatchLabels: map[string]string{
+							"demo": "demo",
+						},
+					},
+					TopologyKey: "demo",
+				},
+			},
+		}
+		manifest, err := model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		assert.NoError(t, err)
+		neo4jStatefulSet := manifest.First(&appsv1.StatefulSet{}).(*appsv1.StatefulSet)
+		podAntiAffinity := neo4jStatefulSet.Spec.Template.Spec.Affinity.PodAntiAffinity
+		assert.NotNil(t, podAntiAffinity, "nil podAntiAffinity found")
+		assert.NotNil(t, podAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution)
+		assert.NotEqual(t, len(podAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution), 0)
+
+		helmValues.PodSpec.PodAntiAffinity = false
+		manifest, err = model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		assert.NoError(t, err)
+		neo4jStatefulSet = manifest.First(&appsv1.StatefulSet{}).(*appsv1.StatefulSet)
+		affinity := neo4jStatefulSet.Spec.Template.Spec.Affinity
+		assert.Nil(t, affinity, "affinity found")
+
+		helmValues.PodSpec.PodAntiAffinity = true
+		manifest, err = model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		assert.NoError(t, err)
+		neo4jStatefulSet = manifest.First(&appsv1.StatefulSet{}).(*appsv1.StatefulSet)
+		podAntiAffinity = neo4jStatefulSet.Spec.Template.Spec.Affinity.PodAntiAffinity
+		assert.NotNil(t, podAntiAffinity, "nil podAntiAffinity found")
+		assert.NotNil(t, podAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution)
+		assert.NotEqual(t, len(podAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution), 0)
+	}))
+}
+
 func TestExtraLabels(t *testing.T) {
 	t.Parallel()
 
@@ -891,6 +998,8 @@ func TestClusterEnabledConfigMap(t *testing.T) {
 	assert.Contains(t, defaultConfig.Data, "dbms.routing.default_router")
 	assert.Contains(t, defaultConfig.Data, "dbms.routing.client_side.enforce_for_domains")
 	assert.Contains(t, defaultConfig.Data, "dbms.routing.enabled")
+	assert.Contains(t, defaultConfig.Data, "dbms.cluster.discovery.version")
+	assert.Contains(t, defaultConfig.Data, "dbms.kubernetes.discovery.v2.service_port_name")
 	assert.Contains(t, defaultConfig.Data, "server.bolt.advertised_address")
 	assert.Contains(t, defaultConfig.Data, "server.discovery.advertised_address")
 	assert.Contains(t, defaultConfig.Data, "server.cluster.raft.advertised_address")
@@ -1354,6 +1463,8 @@ func TestContainerSecurityContext(t *testing.T) {
 		if !assert.Equal(t, *containerSecurityContext.RunAsGroup, int64(7474), fmt.Sprintf("runAsGroup current value %d does not match with %s", *containerSecurityContext.RunAsGroup, "7474")) {
 			return
 		}
+		assert.Equal(t, len(containerSecurityContext.Capabilities.Drop), 1)
+		assert.Equal(t, containerSecurityContext.Capabilities.Drop, []v1.Capability{"ALL"})
 	})
 }
 
@@ -1386,7 +1497,7 @@ func TestAdditionalVolumesAndMounts(t *testing.T) {
 			return
 		}
 		podVolumes := neo4jStatefulSet.Spec.Template.Spec.Volumes
-		if !assert.Equal(t, len(podVolumes), 4, fmt.Sprintf("more than two volumes present")) {
+		if !assert.Equal(t, len(podVolumes), 5, fmt.Sprintf("more than five volumes present")) {
 			return
 		}
 		var volumePresent bool
@@ -1607,6 +1718,146 @@ func TestNeo4jServicePortVariables(t *testing.T) {
 	}))
 }
 
+// TestNeo4jServicePortVariablesWithHTTPPortDisabled disables http port and check if the port is removed from loadbalancer service or not
+func TestNeo4jServicePortVariablesWithHTTPPortDisabled(t *testing.T) {
+	t.Parallel()
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.Services.Neo4j.Ports.HTTP.Enabled = false
+
+		helmValues.Services.Neo4j.Ports.HTTPS.Enabled = true
+		helmValues.Services.Neo4j.Ports.HTTPS.Port = 7473
+		helmValues.Services.Neo4j.Ports.HTTPS.TargetPort = 8001
+		helmValues.Services.Neo4j.Ports.HTTPS.Name = "https-port"
+
+		helmValues.DisableLookups = true
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, "no error should be seen while checking for neo4j lb service ports configuration with http port disabled")
+		lbServiceName := fmt.Sprintf("%s-lb-neo4j", helmValues.Neo4J.Name)
+		lbService := manifests.OfTypeWithName(&v1.Service{}, lbServiceName)
+		assert.NotNil(t, lbService, fmt.Sprintf("no loadbalancer service found with name %s", lbServiceName))
+
+		ports := lbService.(*v1.Service).Spec.Ports
+		assert.Len(t, ports, 2, "there should be only 3 ports in the lbservice")
+		for _, port := range ports {
+			assert.NotEqual(t, port.Name, "http-port", "http-port is not expected")
+			switch port.Name {
+			case "https-port":
+				assert.Equal(t, int(port.Port), 7473, "https port should be 7473")
+				assert.Equal(t, int(port.TargetPort.IntVal), 8001, "https target port should be 8001")
+				continue
+			}
+		}
+	}))
+}
+
+// TestNeo4jStatefulSetPortWithHTTPDisabled disables http port and check if the port is removed from statefulset service or not
+func TestNeo4jStatefulSetPortWithHTTPDisabled(t *testing.T) {
+	t.Parallel()
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		config := make(map[string]string, 1)
+		config["server.http.enabled"] = "false"
+		helmValues.Config = config
+
+		helmValues.DisableLookups = true
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, "no error should be seen while checking for statefulset ports  with http port disabled")
+		statefulset := manifests.OfTypeWithName(&appsv1.StatefulSet{}, model.DefaultHelmTemplateReleaseName.String())
+		assert.NotNil(t, statefulset, "no statefulset found")
+		ports := statefulset.(*appsv1.StatefulSet).Spec.Template.Spec.Containers[0].Ports
+		if edition == "community" {
+			assert.Len(t, ports, 1, "only two statefulset ports should be present")
+		} else {
+			//enterprise has backup port enabled
+			assert.Len(t, ports, 2, "only three statefulset ports should be present")
+		}
+
+		for _, port := range ports {
+			assert.NotEqual(t, port.Name, "http", "http is not expected")
+			assert.NotEqual(t, port.ContainerPort, int32(7474), "7474 is not expected")
+			assert.NotEqual(t, port.Name, "https", "https is not expected")
+			assert.NotEqual(t, port.ContainerPort, int32(7473), "7473 is not expected")
+		}
+
+	}))
+}
+
+// TestNeo4jServicePortVariablesWithHTTPPortDisabledViaConfig disables http port via config and check if the port is removed from k8s service or not
+func TestNeo4jServicePortVariablesWithHTTPPortDisabledViaConfig(t *testing.T) {
+	t.Parallel()
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.Services.Neo4j.Ports.HTTP.Enabled = false
+		helmValues.Services.Neo4j.Ports.HTTPS.Enabled = false
+		helmValues.Services.Neo4j.Enabled = true
+		helmValues.DisableLookups = true
+		config := make(map[string]string, 1)
+		config["server.http.enabled"] = "false"
+		helmValues.Config = config
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, "no error should be seen while checking for neo4j lb service ports configuration with http port disabled")
+
+		services := manifests.OfType(&v1.Service{})
+		assert.NotNil(t, services, "no services found with name")
+
+		for _, service := range services {
+			ports := service.(*v1.Service).Spec.Ports
+			for _, port := range ports {
+				assert.NotEqual(t, port.Name, "http-port", "http-port is not expected")
+				assert.NotEqual(t, port.Port, int32(7474), "7474 is not expected")
+				assert.NotEqual(t, port.TargetPort, "7474", "7474 target port is not expected")
+			}
+		}
+
+	}))
+}
+
+// TestNeo4jServicePortVariablesWithHTTPSPortDisabledViaConfig disables https port via config and check if the port is removed from k8s service or not
+func TestNeo4jServicePortVariablesWithHTTPSPortDisabledViaConfig(t *testing.T) {
+	t.Parallel()
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.Services.Neo4j.Enabled = true
+		helmValues.DisableLookups = true
+		config := make(map[string]string, 1)
+		config["server.https.enabled"] = "false"
+		helmValues.Config = config
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, "no error should be seen while checking for neo4j lb service ports configuration with http port disabled")
+
+		services := manifests.OfType(&v1.Service{})
+		assert.NotNil(t, services, "no services found with name")
+
+		for _, service := range services {
+			ports := service.(*v1.Service).Spec.Ports
+			for _, port := range ports {
+				assert.NotEqual(t, port.Name, "https-port", "https-port is not expected")
+				assert.NotEqual(t, port.Port, int32(7473), "7473 is not expected")
+				assert.NotEqual(t, port.TargetPort, "7473", "7473 target port is not expected")
+
+			}
+		}
+
+	}))
+}
+
 // TestServiceAccountCreation checks if serviceaccount yamls are not generated when a serviceaccount name is provided
 func TestServiceAccountCreation(t *testing.T) {
 	t.Parallel()
@@ -1621,6 +1872,128 @@ func TestServiceAccountCreation(t *testing.T) {
 		assert.NoError(t, err, fmt.Sprintf("error seen while testing service account creation"))
 		serviceaccounts := manifests.OfType(&v1.ServiceAccount{})
 		assert.Len(t, serviceaccounts, 0, fmt.Sprintf("service accounts found %v", serviceaccounts))
+
+	}))
+}
+
+// TestPodDisruptionBudgetLabelsAndValues checks if podDisruptionBudget has the provided labels and minAvai and maxUnavai values set or not
+func TestPodDisruptionBudgetLabelsAndValues(t *testing.T) {
+	t.Parallel()
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.PodDisruptionBudget.Enabled = true
+		helmValues.PodDisruptionBudget.Labels = map[string]string{
+			"demo": "neo4j",
+		}
+		helmValues.PodDisruptionBudget.MaxUnavailable = "5"
+		helmValues.PodDisruptionBudget.MinAvailable = "3"
+		helmValues.PodDisruptionBudget.MatchLabels = map[string]string{
+			"name": "pdb",
+		}
+		matchExpressions := []model.MatchExpressions{
+			{
+				Key:      "demo",
+				Operator: "Equals",
+				Values:   []string{"neo4j"},
+			},
+		}
+		helmValues.PodDisruptionBudget.MatchExpressions = matchExpressions
+
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, fmt.Sprintf("error seen while testing pod distruption budget labels"))
+		podDisruptionBudgets := manifests.OfType(&v12.PodDisruptionBudget{})
+		assert.Len(t, podDisruptionBudgets, 1, "more than 1 podDisruptionBudget found")
+		podDisruptionBudget := podDisruptionBudgets[0]
+		assert.Contains(t, podDisruptionBudget.(*v12.PodDisruptionBudget).Labels, "demo", "missing label 'demo'")
+		assert.Equal(t, podDisruptionBudget.(*v12.PodDisruptionBudget).Spec.MinAvailable.String(), helmValues.PodDisruptionBudget.MinAvailable)
+		assert.Equal(t, podDisruptionBudget.(*v12.PodDisruptionBudget).Spec.MaxUnavailable.String(), helmValues.PodDisruptionBudget.MaxUnavailable)
+		assert.Contains(t, podDisruptionBudget.(*v12.PodDisruptionBudget).Spec.Selector.MatchLabels, "name", "missing label 'name'")
+		assert.Len(t, podDisruptionBudget.(*v12.PodDisruptionBudget).Spec.Selector.MatchExpressions, 1, "more than 1 matchExpressions found")
+		for _, matchExpr := range podDisruptionBudget.(*v12.PodDisruptionBudget).Spec.Selector.MatchExpressions {
+			assert.Equal(t, string(matchExpr.Operator), matchExpressions[0].Operator)
+			assert.Equal(t, matchExpr.Key, matchExpressions[0].Key)
+			assert.Equal(t, matchExpr.Values, matchExpressions[0].Values)
+		}
+	}))
+}
+
+// TestPodDisruptionBudgetLabelsAndValues checks if podDisruptionBudget has the provided labels and minAvai and maxUnavai values set or not
+func TestEmptyPodDisruptionBudgetWhenDisabled(t *testing.T) {
+	t.Parallel()
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.PodDisruptionBudget.Enabled = false
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, fmt.Sprintf("error seen while testing pod distruption budget labels"))
+		podDisruptionBudgets := manifests.OfType(&v12.PodDisruptionBudget{})
+		assert.Nil(t, podDisruptionBudgets, "podDisruptionBudget found")
+	}))
+}
+
+// TestServiceMonitorWhenEnabled checks for service monitor spec when enabled
+func TestServiceMonitorWhenEnabled(t *testing.T) {
+	t.Parallel()
+	//assert.NoError(t, installPrometheusCRDS(), "error seen while installing prometheus crds")
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.ServiceMonitor.Enabled = true
+		helmValues.ServiceMonitor.Port = "2204"
+		helmValues.ServiceMonitor.Labels = map[string]string{
+			"name": "service-monitor",
+		}
+		helmValues.ServiceMonitor.Interval = "30s"
+		helmValues.ServiceMonitor.JobLabel = "name"
+		helmValues.ServiceMonitor.Path = "/metrics"
+		helmValues.ServiceMonitor.NamespaceSelector = model.NamespaceSelector{
+			Any:        false,
+			MatchNames: []string{"demo", "default"},
+		}
+		helmValues.ServiceMonitor.TargetLabels = []string{"name"}
+
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, fmt.Sprintf("error seen while testing service monitor when enabled"))
+		serviceMonitors := manifests.OfType(&pv1.ServiceMonitor{})
+		assert.Len(t, serviceMonitors, 1, "serviceMonitor not found")
+		serviceMonitor := serviceMonitors[0].(*pv1.ServiceMonitor)
+		assert.Len(t, serviceMonitor.Spec.Endpoints, 1, "more than one endpoint found in service monitor")
+		endPoint := serviceMonitor.Spec.Endpoints[0]
+		assert.Equal(t, endPoint.Port, helmValues.ServiceMonitor.Port)
+		assert.Equal(t, endPoint.Path, helmValues.ServiceMonitor.Path)
+		assert.Equal(t, string(endPoint.Interval), helmValues.ServiceMonitor.Interval)
+		assert.Equal(t, serviceMonitor.Labels, helmValues.ServiceMonitor.Labels)
+		assert.Equal(t, serviceMonitor.Spec.TargetLabels, helmValues.ServiceMonitor.TargetLabels)
+		assert.Equal(t, serviceMonitor.Spec.NamespaceSelector.MatchNames, helmValues.ServiceMonitor.NamespaceSelector.MatchNames)
+	}))
+}
+
+// TestServiceMonitorWhenDisabled checks for service monitor spec when disabled
+func TestServiceMonitorWhenDisabled(t *testing.T) {
+	t.Parallel()
+	//assert.NoError(t, installPrometheusCRDS(), "error seen while installing prometheus crds")
+	var helmValues model.HelmValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		helmValues = model.DefaultCommunityValues
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.ServiceMonitor.Enabled = false
+
+		manifests, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		assert.NoError(t, err, fmt.Sprintf("error seen while testing service monitor when disabled"))
+		serviceMonitors := manifests.OfType(&pv1.ServiceMonitor{})
+		assert.Nil(t, serviceMonitors)
 
 	}))
 }
@@ -1786,6 +2159,194 @@ func TestDisableSubPathExprFlag(t *testing.T) {
 	})
 }
 
+// TestNeo4jAuthPathVolumeMountWithPasswordFromSecret ensure that the neo4j-auth volume mount via passswordFromSecret is present
+func TestNeo4jAuthPathVolumeMountWithPasswordFromSecret(t *testing.T) {
+
+	t.Parallel()
+
+	helmValues := model.DefaultCommunityValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.DisableLookups = true
+		helmValues.Neo4J.PasswordFromSecret = "demo-secret"
+		manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		statefulSet := manifest.OfType(&appsv1.StatefulSet{})[0]
+		assert.NotNil(t, statefulSet, "statefulset missing")
+
+		volumes := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Volumes
+		assert.NotEqual(t, len(volumes), 0, "no volumes found")
+		var names []string
+		for _, volume := range volumes {
+			names = append(names, volume.Name)
+		}
+		assert.Contains(t, names, "neo4j-auth", "missing neo4j-auth volume")
+
+		volumeMounts := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Containers[0].VolumeMounts
+		assert.NotEqual(t, len(volumeMounts), 0, "no volume mounts found")
+		names = []string{}
+		var mountPath []string
+		for _, volumeMount := range volumeMounts {
+			names = append(names, volumeMount.Name)
+			mountPath = append(mountPath, volumeMount.MountPath)
+		}
+		assert.Contains(t, names, "neo4j-auth", "missing neo4j-auth volume mount")
+		assert.Contains(t, mountPath, "/config/neo4j-auth", "missing neo4j-auth volume mount path")
+	}))
+}
+
+// TestNeo4jAuthPathVolumeMountWithoutPasswordFromSecret ensure that the neo4j-auth volume mount without passwordFromSecret is present
+func TestNeo4jAuthPathVolumeMountWithoutPasswordFromSecret(t *testing.T) {
+
+	t.Parallel()
+
+	helmValues := model.DefaultCommunityValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.DisableLookups = true
+		manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		statefulSet := manifest.OfType(&appsv1.StatefulSet{})[0]
+		assert.NotNil(t, statefulSet, "statefulset missing")
+
+		volumes := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Volumes
+		assert.NotEqual(t, len(volumes), 0, "no volumes found")
+		var names []string
+		for _, volume := range volumes {
+			names = append(names, volume.Name)
+		}
+		assert.Contains(t, names, "neo4j-auth", "missing neo4j-auth volume")
+
+		volumeMounts := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.Containers[0].VolumeMounts
+		assert.NotEqual(t, len(volumeMounts), 0, "no volume mounts found")
+		names = []string{}
+		var mountPath []string
+		for _, volumeMount := range volumeMounts {
+			names = append(names, volumeMount.Name)
+			mountPath = append(mountPath, volumeMount.MountPath)
+		}
+		assert.Contains(t, names, "neo4j-auth", "missing neo4j-auth volume mount")
+		assert.Contains(t, mountPath, "/config/neo4j-auth", "missing neo4j-auth volume mount path")
+	}))
+}
+
+// TestNeo4jPodSpecDNSPolicy ensure that the provided dns policy is being set
+func TestNeo4jPodSpecDNSPolicy(t *testing.T) {
+
+	t.Parallel()
+
+	helmValues := model.DefaultCommunityValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.DisableLookups = true
+		helmValues.PodSpec.DNSPolicy = "demo"
+		manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		statefulSet := manifest.OfType(&appsv1.StatefulSet{})[0]
+		assert.NotNil(t, statefulSet, "statefulset missing")
+
+		dnsPolicy := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.DNSPolicy
+		assert.Equal(t, string(dnsPolicy), "demo", "dns policy not matching")
+	}))
+}
+
+// TestNeo4jPodSpecTopologySpreadConstraints ensure that the provided topologySpreadConstraints are being set
+func TestNeo4jPodSpecTopologySpreadConstraints(t *testing.T) {
+
+	t.Parallel()
+	tsc := model.TopologySpreadConstraint{
+		MaxSkew:           1,
+		TopologyKey:       "demo",
+		WhenUnsatisfiable: "demo",
+	}
+
+	helmValues := model.DefaultCommunityValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.DisableLookups = true
+		helmValues.PodSpec.TopologySpreadConstraints = []model.TopologySpreadConstraint{tsc}
+		manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		statefulSet := manifest.OfType(&appsv1.StatefulSet{})[0]
+		assert.NotNil(t, statefulSet, "statefulset missing")
+
+		tscs := statefulSet.(*appsv1.StatefulSet).Spec.Template.Spec.TopologySpreadConstraints
+		assert.Equal(t, len(tscs), 1, "more than 1 or zero topology spread constraints found")
+		assert.Equal(t, tscs[0].MaxSkew, int32(1), "maxSkew not matching")
+		assert.Equal(t, tscs[0].TopologyKey, "demo", "topologyKey not matching")
+	}))
+}
+
+// TestNeo4jPodSpecTopologySpreadConstraints ensure that the provided topologySpreadConstraints are being set
+func TestNeo4jLoadBalancerNodePort(t *testing.T) {
+
+	t.Parallel()
+
+	helmValues := model.DefaultCommunityValues
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+
+		if edition == "enterprise" {
+			helmValues = model.DefaultEnterpriseValues
+		}
+		helmValues.DisableLookups = true
+		helmValues.Services.Neo4j.Ports.HTTP.Enabled = true
+		helmValues.Services.Neo4j.Ports.HTTP.NodePort = 1234
+		helmValues.Services.Neo4j.Spec.Type = "NodePort"
+		manifest, err := model.HelmTemplateFromStruct(t, chart, helmValues, "--dry-run")
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		services := manifest.OfType(&v1.Service{})
+		assert.NotNil(t, services, "services missing")
+
+		var nodePortService *v1.Service
+		for _, service := range services {
+			if string(service.(*v1.Service).Spec.Type) == "NodePort" {
+				nodePortService = service.(*v1.Service)
+				break
+			}
+		}
+		assert.NotNil(t, nodePortService, "no nodeport service found")
+		ports := nodePortService.Spec.Ports
+		assert.NotNil(t, ports, "no ports found for nodeport service")
+
+		var portFound bool
+		for _, port := range ports {
+			if port.Name == "http" {
+				assert.Equal(t, port.NodePort, int32(1234), "nodePort found is not matching")
+				portFound = true
+				break
+			}
+		}
+		assert.Equal(t, portFound, true, "nodePort not found")
+	}))
+}
+
 // checkMemoryResources runs helm template on all charts of all editions with invalid memory values
 func checkMemoryResources(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string, memorySlice []string, containsErrMsg string) {
 
@@ -1944,4 +2505,60 @@ func assertOnlyNeo4jImagesUsedInStatefulSet(t *testing.T, neo4jStatefulSet *apps
 	for _, container := range neo4jStatefulSet.Spec.Template.Spec.InitContainers {
 		assert.Contains(t, container.Image, "neo4j:")
 	}
+}
+
+// TestCleanupJobPodAnnotations checks if cleanup job Pod has the default and custom annotations
+func TestCleanupJobPodAnnotations(t *testing.T) {
+	t.Parallel()
+
+	forEachPrimaryChart(t, andEachSupportedEdition(func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		if edition != "enterprise" {
+			return // Skip test for non-enterprise edition since cleanup job is enterprise-only
+		}
+
+		// Test default annotation
+		manifest, err := model.HelmTemplate(t, chart, []string{
+			"--set", "neo4j.name=" + model.DefaultNeo4jName,
+			"--set", "neo4j.minimumClusterSize=3",
+			"--set", "neo4j.edition=enterprise",
+			"--set", "neo4j.acceptLicenseAgreement=yes",
+			"--set", "services.neo4j.cleanup.enabled=true",
+			"--set", "volumes.data.mode=selector",
+		})
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		cleanupJob := manifest.OfTypeWithName(&batchv1.Job{}, fmt.Sprintf("%s-cleanup", model.DefaultHelmTemplateReleaseName))
+		if !assert.NotNil(t, cleanupJob, "cleanup job not found") {
+			return
+		}
+
+		podAnnotations := cleanupJob.(*batchv1.Job).Spec.Template.ObjectMeta.Annotations
+		assert.Equal(t, "false", podAnnotations["sidecar.istio.io/inject"], "default sidecar.istio.io/inject annotation value should be false")
+
+		// Test custom annotations
+		manifest, err = model.HelmTemplate(t, chart, []string{
+			"--set", "neo4j.name=" + model.DefaultNeo4jName,
+			"--set", "neo4j.minimumClusterSize=3",
+			"--set", "neo4j.edition=enterprise",
+			"--set", "neo4j.acceptLicenseAgreement=yes",
+			"--set", "services.neo4j.cleanup.enabled=true",
+			"--set-string", "services.neo4j.cleanup.podAnnotations.sidecar\\.istio\\.io/inject=true",
+			"--set", "services.neo4j.cleanup.podAnnotations.custom\\.annotation/test=value",
+			"--set", "volumes.data.mode=selector",
+		})
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		cleanupJob = manifest.OfTypeWithName(&batchv1.Job{}, fmt.Sprintf("%s-cleanup", model.DefaultHelmTemplateReleaseName))
+		if !assert.NotNil(t, cleanupJob, "cleanup job not found") {
+			return
+		}
+
+		podAnnotations = cleanupJob.(*batchv1.Job).Spec.Template.ObjectMeta.Annotations
+		assert.Equal(t, "true", podAnnotations["sidecar.istio.io/inject"], "custom sidecar.istio.io/inject annotation value should be true")
+		assert.Equal(t, "value", podAnnotations["custom.annotation/test"], "custom annotation should be present")
+	}))
 }
