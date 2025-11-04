@@ -60,17 +60,34 @@
 {{- define "neo4j.backup.checkDatabaseIPAndServiceName" -}}
 
     {{- if or (kindIs "invalid" .Values.backup.aggregate) (not .Values.backup.aggregate.enabled) -}}
-        {{- if and (kindIs "invalid" .Values.backup.databaseAdminServiceName) (kindIs "invalid" .Values.backup.databaseAdminServiceIP) -}}
-            {{- fail (printf "Missing fields. Please set databaseAdminServiceName via --set backup.databaseAdminServiceName or databaseAdminServiceIP via --set backup.databaseAdminServiceIP")}}
+        {{- if and (kindIs "invalid" .Values.backup.databaseAdminServiceName) (kindIs "invalid" .Values.backup.databaseAdminServiceIP) (kindIs "invalid" .Values.backup.databaseBackupEndpoints) -}}
+            {{- fail (printf "Missing fields. Please set databaseAdminServiceName via --set backup.databaseAdminServiceName or databaseAdminServiceIP via --set backup.databaseAdminServiceIP or databaseBackupEndpoints via --set backup.databaseBackupEndpoints")}}
         {{- end -}}
 
-        {{- if and (empty (.Values.backup.databaseAdminServiceName | trim)) (empty (.Values.backup.databaseAdminServiceIP | trim)) -}}
-            {{- fail (printf "Empty fields. Please set databaseAdminServiceName via --set backup.databaseAdminServiceName or databaseAdminServiceIP via --set backup.databaseAdminServiceIP")}}
+        {{- if and (empty (.Values.backup.databaseAdminServiceName | trim)) (empty (.Values.backup.databaseAdminServiceIP | trim)) (empty (.Values.backup.databaseBackupEndpoints | trim)) -}}
+            {{- fail (printf "Empty fields. Please set databaseAdminServiceName via --set backup.databaseAdminServiceName or databaseAdminServiceIP via --set backup.databaseAdminServiceIP or databaseBackupEndpoints via --set backup.databaseBackupEndpoints")}}
         {{- end -}}
 
-            {{- if and (.Values.backup.databaseAdminServiceName | trim) (.Values.backup.databaseAdminServiceIP | trim) -}}
-            {{- fail (printf "Please set databaseAdminServiceName via --set backup.databaseAdminServiceName or databaseAdminServiceIP via --set backup.databaseAdminServiceIP. Cannot use both")}}
+        {{- if or (and (.Values.backup.databaseAdminServiceName | trim) (.Values.backup.databaseAdminServiceIP | trim)) (and (.Values.backup.databaseAdminServiceName | trim) (.Values.backup.databaseBackupEndpoints | trim)) (and (.Values.backup.databaseAdminServiceIP | trim) (.Values.backup.databaseBackupEndpoints | trim)) -}}
+            {{- fail (printf "Please set only one of: databaseAdminServiceName via --set backup.databaseAdminServiceName or databaseAdminServiceIP via --set backup.databaseAdminServiceIP or databaseBackupEndpoints via --set backup.databaseBackupEndpoints")}}
         {{- end -}}
     {{- end -}}
 
+{{- end -}}
+
+{{/* Validate and set default timeout for consistency check */}}
+{{- define "neo4j.backup.validateAndSetTimeout" -}}
+    {{- $timeout := .Values.consistencyCheck.timeout | default "" -}}
+    {{- if $timeout -}}
+        {{- /* Validate timeout format using regex for Go duration format */ -}}
+        {{- /* Supports compound durations like "2h30m" and decimal values like "1.5h" */ -}}
+        {{- if not (regexMatch "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$" $timeout) -}}
+            {{- fail (printf "Invalid timeout format '%s'. Must be a valid Go duration (e.g., '30m', '1h', '2h30m', '1.5h', '4h')" $timeout) -}}
+        {{- end -}}
+        {{- /* Return the provided timeout */ -}}
+        {{- $timeout -}}
+    {{- else -}}
+        {{- /* Apply conditional default based on cloudProvider */ -}}
+        {{- if .Values.backup.cloudProvider }}30m{{- else }}{{- /* No timeout for local storage */ -}}{{- end -}}
+    {{- end -}}
 {{- end -}}

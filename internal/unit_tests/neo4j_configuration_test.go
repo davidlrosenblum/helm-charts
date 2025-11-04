@@ -3,13 +3,14 @@ package unit_tests
 import (
 	"bufio"
 	"fmt"
+	"os"
+	"strings"
+	"testing"
+
 	"github.com/neo4j/helm-charts/internal/model"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"os"
-	"strings"
-	"testing"
 )
 
 func containsString(s []string, e string) bool {
@@ -208,6 +209,116 @@ func TestNameOverrideStatefulSet(t *testing.T) {
 			Name:  "SERVICE_NEO4J",
 			Value: fmt.Sprintf("%s.neo4j-my-release.svc.cluster.local", nameOverride),
 		})
+	}
+
+	forEachPrimaryChart(t, andEachSupportedEdition(doTestCase))
+}
+
+func TestProbeConfiguration(t *testing.T) {
+	t.Parallel()
+
+	doTestCase := func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		// Test case 1: Default probe configuration
+		helmValues := model.DefaultEnterpriseValues
+		manifest, err := model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		neo4jStatefulSet := manifest.First(&appsv1.StatefulSet{}).(*appsv1.StatefulSet)
+		neo4jContainer := neo4jStatefulSet.Spec.Template.Spec.Containers[0]
+
+		assert.Equal(t, int32(7687), neo4jContainer.ReadinessProbe.TCPSocket.Port.IntVal)
+		assert.Equal(t, int32(20), neo4jContainer.ReadinessProbe.FailureThreshold)
+		assert.Equal(t, int32(10), neo4jContainer.ReadinessProbe.TimeoutSeconds)
+		assert.Equal(t, int32(5), neo4jContainer.ReadinessProbe.PeriodSeconds)
+
+		helmValues.ReadinessProbe = model.ReadinessProbe{
+			HTTPGet: &model.HTTPGetAction{
+				Path: "/ready",
+				Port: 7474,
+			},
+			FailureThreshold:    30,
+			TimeoutSeconds:      15,
+			PeriodSeconds:       10,
+			InitialDelaySeconds: 20,
+		}
+
+		manifest, err = model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		neo4jStatefulSet = manifest.First(&appsv1.StatefulSet{}).(*appsv1.StatefulSet)
+		neo4jContainer = neo4jStatefulSet.Spec.Template.Spec.Containers[0]
+
+		// Verify custom probe configuration
+		assert.Equal(t, "/ready", neo4jContainer.ReadinessProbe.HTTPGet.Path)
+		assert.Equal(t, int32(7474), neo4jContainer.ReadinessProbe.HTTPGet.Port.IntVal)
+		assert.Equal(t, int32(30), neo4jContainer.ReadinessProbe.FailureThreshold)
+		assert.Equal(t, int32(15), neo4jContainer.ReadinessProbe.TimeoutSeconds)
+		assert.Equal(t, int32(10), neo4jContainer.ReadinessProbe.PeriodSeconds)
+		assert.Equal(t, int32(20), neo4jContainer.ReadinessProbe.InitialDelaySeconds)
+	}
+
+	forEachPrimaryChart(t, andEachSupportedEdition(doTestCase))
+}
+
+func TestTlsReloadConfiguration(t *testing.T) {
+	t.Parallel()
+
+	doTestCase := func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		// Test case 1: Default configuration (should be true)
+		helmValues := model.DefaultEnterpriseValues
+		manifest, err := model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		userConfigMap := manifest.OfTypeWithName(&v1.ConfigMap{}, model.DefaultHelmTemplateReleaseName.UserConfigMapName()).(*v1.ConfigMap)
+		assert.Equal(t, "true", userConfigMap.Data["dbms.security.tls_reload_enabled"])
+
+		// Test case 2: Explicitly set to false
+		helmValues.Config = map[string]string{
+			"dbms.security.tls_reload_enabled": "false",
+		}
+		manifest, err = model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		userConfigMap = manifest.OfTypeWithName(&v1.ConfigMap{}, model.DefaultHelmTemplateReleaseName.UserConfigMapName()).(*v1.ConfigMap)
+		assert.Equal(t, "false", userConfigMap.Data["dbms.security.tls_reload_enabled"])
+	}
+
+	forEachPrimaryChart(t, andEachSupportedEdition(doTestCase))
+}
+
+func TestSpeedyConfiguration(t *testing.T) {
+	t.Parallel()
+
+	doTestCase := func(t *testing.T, chart model.Neo4jHelmChartBuilder, edition string) {
+		// Test case 1: Default configuration (should be false)
+		helmValues := model.DefaultEnterpriseValues
+		manifest, err := model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		userConfigMap := manifest.OfTypeWithName(&v1.ConfigMap{}, model.DefaultHelmTemplateReleaseName.UserConfigMapName()).(*v1.ConfigMap)
+		assert.Equal(t, "false", userConfigMap.Data["internal.dbms.sharded_property_database.enabled"])
+
+		// Test case 2: Explicitly set to true
+		helmValues.Config = map[string]string{
+			"internal.dbms.sharded_property_database.enabled": "true",
+		}
+		manifest, err = model.HelmTemplateFromStruct(t, model.HelmChart, helmValues)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		userConfigMap = manifest.OfTypeWithName(&v1.ConfigMap{}, model.DefaultHelmTemplateReleaseName.UserConfigMapName()).(*v1.ConfigMap)
+		assert.Equal(t, "true", userConfigMap.Data["internal.dbms.sharded_property_database.enabled"])
 	}
 
 	forEachPrimaryChart(t, andEachSupportedEdition(doTestCase))

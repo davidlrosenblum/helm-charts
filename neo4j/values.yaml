@@ -37,11 +37,18 @@ neo4j:
   # The operations pod ends successfully if the server is enabled, or it was already enabled
   operations:
       enableServer: false
-      image: "neo4j/helm-charts-operations:5.26.0"
+      image: "neo4j/helm-charts-operations:2025.10.1"
       # protocol can be "neo4j or "neo4j+ssc" or "neo4j+s". Default set to neo4j
       # Note: Do not specify bolt protocol here...it will FAIL.
       protocol: "neo4j"
       labels: {}
+      # SSL/TLS configuration for operations pod connections
+      ssl:
+        # Set to true to disable hostname verification for TLS connections
+        # This should match the Neo4j server's dbms.ssl.policy.bolt.verify_hostname setting
+        disableHostnameVerification: false
+        # Set to true to skip all TLS certificate verification (not recommended for production)
+        insecureSkipVerify: false
 
   # set edition: "enterprise" to use Neo4j Enterprise Edition
   #
@@ -51,6 +58,7 @@ neo4j:
   # Email inquiries can be directed to: licensing@neo4j.com
   #
   # Set acceptLicenseAgreement: "yes" to confirm that you have a Neo4j license agreement.
+  # Set acceptLicenseAgreement: "eval" to use Neo4j Enterprise Edition for evaluation purposes.
   acceptLicenseAgreement: "no"
   #
   # set offlineMaintenanceModeEnabled: true to restart the StatefulSet without the Neo4j process running
@@ -190,6 +198,21 @@ additionalVolumeMounts: []
 #  - mountPath: "/config/neo4j1.conf"
 #    name: neo4j1-conf
 
+# Mount Kubernetes secrets into the Neo4j pod for use with seedURI operations
+secretMounts: {}
+#  # Example: Mount S3 credentials for seedURI restoration from private S3 buckets
+#  s3-credentials:
+#    secretName: "my-s3-secret"
+#    mountPath: "/var/secrets/s3"
+#    # Optional: specify individual keys from the secret to mount (if not specified, all keys are mounted)
+#    items:
+#      - key: "access-key"
+#        path: "access-key"
+#      - key: "secret-key"
+#        path: "secret-key"
+#    # Optional: set file permissions for mounted files (default: 0644)
+#    defaultMode: 0600
+
 # ldapPasswordFromSecret defines the secret which holds the password for ldap system account
 # Secret key name must be LDAP_PASS
 # This secret is accessible by Neo4j at the path defined in ldapPasswordMountPath
@@ -280,8 +303,8 @@ services:
       podAnnotations:
         sidecar.istio.io/inject: "false" 
       image:
-        registry: docker.io
-        repository: bitnami/kubectl
+        registry: registry.k8s.io
+        repository: kubernetes/kubectl
         # Will default to use the Kubernetes server version where the chart is deployed, eg 1.22
         tag: ""
         digest: ""
@@ -328,6 +351,14 @@ config:
   # server.memory.heap.initial_size: "317m"
   # server.memory.heap.max_size: "317m"
 
+  # Enable automatic reloading of TLS certificates
+  dbms.security.tls_reload_enabled: "true"
+
+  # SPeeDy (Sharded Property Database) feature flag
+  # Enables the sharded property database feature for improved performance with large datasets
+  # Set to "true" to enable SPeeDy, "false" to disable (default: false)
+  internal.dbms.sharded_property_database.enabled: "false"
+
 apoc_config: {}
 #  apoc.trigger.enabled: "true"
 #  apoc.import.file.enabled: "true"
@@ -371,6 +402,8 @@ containerSecurityContext:
 # Because Neo4j uses Java these values are large to distinguish between long Garbage Collection pauses (which don't require a restart) and an actual failure.
 # These values should mark Neo4j as not ready after at most 5 minutes of problems (20 attempts * max 15 seconds between probes)
 readinessProbe:
+  tcpSocket:
+    port: 7687
   failureThreshold: 20
   timeoutSeconds: 10
   periodSeconds: 5
@@ -379,6 +412,8 @@ readinessProbe:
 # Because Neo4j uses Java these values are large to distinguish between long Garbage Collection pauses (which don't require a restart) and an actual failure.
 # These values should trigger a restart after at most 10 minutes of problems (40 attempts * max 15 seconds between probes)
 livenessProbe:
+  tcpSocket:
+    port: 7687
   failureThreshold: 40
   timeoutSeconds: 10
   periodSeconds: 5
@@ -388,6 +423,8 @@ livenessProbe:
 # When restoring Neo4j from a backup it's important that startup probe gives time for Neo4j to recover and/or upgrade store files
 # When using Neo4j clusters it's important that startup probe give the Neo4j cluster time to form
 startupProbe:
+  tcpSocket:
+    port: 7687
   failureThreshold: 1000
   periodSeconds: 5
 
@@ -431,15 +468,18 @@ ssl:
 # Kubernetes cluster domain suffix
 clusterDomain: "cluster.local"
 
-# Discovery version, possible values are V1_ONLY, V1_OVER_V2, V2_OVER_V1, V2_ONLY
-discoveryVersion: "V1_ONLY"
-
 
 # Override image settings in Neo4j pod
 image:
   imagePullPolicy: IfNotPresent
   # set a customImage if you want to use your own docker image
 #  customImage: eu.gcr.io/neo4j-helm/neo4j:v5
+
+  # New optional separated image configuration. Use either this or customImage, not both.
+  # If using these, the chart will manage the tag based on the Neo4j version and edition.
+  registry: ""  # e.g., "my.private.registry.com"
+  repository: ""  # default to "neo4j" if empty
+  tag: ""  # if empty, uses chart's default tag (AppVersion[-enterprise])
 
   #imagePullSecrets list
 #  imagePullSecrets:

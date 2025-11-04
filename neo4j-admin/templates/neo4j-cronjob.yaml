@@ -4,6 +4,9 @@
 {{- template "neo4j.backup.checkBucketName" . -}}
 {{- template "neo4j.backup.checkServiceAccountName" . -}}
 {{- template "neo4j.checkNodeSelectorLabels" . -}}
+{{- if and .Values.backup.s3CASecretName (not .Values.backup.s3CASecretKey) }}
+{{- fail "If backup.s3CASecretName is specified, backup.s3CASecretKey must also be specified" }}
+{{- end }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -38,13 +41,21 @@ spec:
           automountServiceAccountToken: true
           {{- end }}
           restartPolicy: Never
+          {{- if .Values.neo4j.imagePullSecrets }}
+          imagePullSecrets:
+          {{- range .Values.neo4j.imagePullSecrets }}
+          - name: {{ . }}
+          {{- end }}
+          {{- end }}
           securityContext: {{ .Values.securityContext | toYaml  | nindent 12 }}
           {{- include "neo4j.tolerations" .Values.tolerations | nindent 10 }}
           {{- include "neo4j.affinity" .Values.affinity| nindent 10 }}
           {{- include "neo4j.nodeSelector" . }}
           containers:
             - name: graph-backup
-              image: {{ .Values.neo4j.image }}:{{ .Values.neo4j.imageTag }}
+              {{- $registry := .Values.neo4j.registry | default "" }}
+              {{- $image_prefix := ternary (printf "%s/" $registry) "" (ne $registry "") }}
+              image: {{ $image_prefix }}{{ .Values.neo4j.image }}:{{ .Values.neo4j.imageTag }}
               imagePullPolicy: Always
               resources: {{- include "neo4j.resourcesAndLimits" . | nindent 16 }}
               env:
@@ -65,7 +76,7 @@ spec:
                 - name: BUCKET_NAME
                   value: {{ .Values.backup.bucketName | trim }}
                 - name: KEEP_BACKUP_FILES
-                  value: "{{ .Values.backup.keepBackupFiles | default true }}"
+                  value: {{ .Values.backup.keepBackupFiles | toString | quote | default true }}
                 - name: PAGE_CACHE
                   value: {{ .Values.backup.pageCache | trim }}
                 - name: HEAP_SIZE
@@ -73,55 +84,120 @@ spec:
                 - name: INCLUDE_METADATA
                   value: "{{ .Values.backup.includeMetadata | default "all" | trim }}"
                 - name: PARALLEL_RECOVERY
-                  value: "{{ .Values.backup.parallelRecovery | default false }}"
+                  value: {{ .Values.backup.parallelRecovery | toString | quote | default false }}
                 - name: TYPE
                   value: "{{ .Values.backup.type | default "AUTO" | trim }}"
                 - name: KEEP_FAILED
-                  value: "{{ .Values.backup.keepFailed | default false }}"
+                  value: {{ .Values.backup.keepFailed | toString | quote | default false }}
+                - name: PREFER_DIFF_AS_PARENT
+                  value: {{ .Values.backup.preferDiffAsParent | toString | quote | default false }}
                 - name: CREDENTIAL_PATH
                   value: "{{ printf "/credentials/%s" .Values.backup.secretKeyName | default ""  }}"
+                {{- if .Values.backup.secretKeyName }}
+                {{- if .Values.backup.awsCredentialsFile }}
+                - name: AWS_SHARED_CREDENTIALS_FILE
+                  value: "{{ .Values.backup.awsCredentialsFile }}"
+                {{- else if eq .Values.backup.cloudProvider "aws" }}
+                - name: AWS_SHARED_CREDENTIALS_FILE
+                  value: "{{ printf "/credentials/%s" .Values.backup.secretKeyName }}"
+                {{- end }}
+                {{- if .Values.backup.gcpCredentialsFile }}
+                - name: GOOGLE_APPLICATION_CREDENTIALS
+                  value: "{{ .Values.backup.gcpCredentialsFile }}"
+                {{- else if eq .Values.backup.cloudProvider "gcp" }}
+                - name: GOOGLE_APPLICATION_CREDENTIALS
+                  value: "{{ printf "/credentials/%s" .Values.backup.secretKeyName }}"
+                {{- end }}
+                {{- end }}
                 - name: VERBOSE
-                  value: "{{ .Values.backup.verbose | default true }}"
-                - name: AZURE_STORAGE_ACCOUNT_NAME
+                  value: {{ .Values.backup.verbose | toString | quote | default true }}
+                - name: COMPRESS
+                  value: {{ .Values.backup.compress | toString | quote | default true }}
+                - name: AZURE_STORAGE_ACCOUNT
                   value: "{{ .Values.backup.azureStorageAccountName | default "" }}"
-                - name: ENDPOINT
-                  value: "{{ .Values.backup.minioEndpoint | default "" }}"
+                - name: BACKUP_TEMP_DIR
+                  value: {{ .Values.backup.tempDir | default "" | quote }}
+                - name: AZURE_BLOB_SERVICE_URL
+                  value: "{{ .Values.backup.azureBlobServiceURL | default "" }}"
+                {{- if or .Values.backup.s3Endpoint .Values.backup.minioEndpoint }}
+                - name: AWS_ENDPOINT_URL_S3
+                  value: "{{ .Values.backup.s3Endpoint | default .Values.backup.minioEndpoint }}"
+                {{- end }}
+                - name: S3_CA_CERT_PATH
+                  value: "{{ if .Values.backup.s3CASecretName }}{{ printf "/s3-ca-cert/%s" .Values.backup.s3CASecretKey }}{{ end }}"
+                - name: S3_SKIP_VERIFY
+                  value: {{ .Values.backup.s3SkipVerify | toString | quote | default false }}
+                - name: S3_FORCE_PATH_STYLE
+                  value: {{ .Values.backup.s3ForcePathStyle | toString | quote | default true }}
+                - name: AWS_REGION
+                  value: "{{ .Values.backup.s3Region | default "" }}"
+                - name: AWS_DEFAULT_REGION
+                  value: "{{ .Values.backup.s3Region | default "" }}"
+                - name: S3_SIGNATURE_VERSION
+                  value: "{{ .Values.backup.s3SignatureVersion | default "" }}"
+                {{- if .Values.backup.s3RequestChecksumCalculation }}
+                - name: AWS_REQUEST_CHECKSUM_CALCULATION
+                  value: "{{ .Values.backup.s3RequestChecksumCalculation }}"
+                {{- end }}
+                {{- if .Values.backup.s3ResponseChecksumValidation }}
+                - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+                  value: "{{ .Values.backup.s3ResponseChecksumValidation }}"
+                {{- end }}
+                {{- if .Values.backup.s3DisableMultipartChecksums }}
+                - name: AWS_S3_DISABLE_MULTIPART_CHECKSUMS
+                  value: "true"
+                {{- end }}
+                {{- if eq .Values.backup.cloudProvider "aws" }}
+                - name: JAVA_OPTS
+                  value: "-Daws.java.v2.sync.http.client=urlconnection"
+                {{- end }}
                 - name: CONSISTENCY_CHECK_ENABLE
-                  value: "{{ .Values.consistencyCheck.enable | default false }}"
+                  value: {{ .Values.consistencyCheck.enable | toString | quote | default false }}
                 - name: CONSISTENCY_CHECK_INDEXES
-                  value: "{{ .Values.consistencyCheck.checkIndexes | default false }}"
+                  value: {{ .Values.consistencyCheck.checkIndexes | toString | quote | default false }}
                 - name: CONSISTENCY_CHECK_DATABASE
                   value: {{ .Values.consistencyCheck.database | default .Values.backup.database | trim }}
                 - name: CONSISTENCY_CHECK_GRAPH
-                  value: "{{ .Values.consistencyCheck.checkGraph | default false }}"
+                  value: {{ .Values.consistencyCheck.checkGraph | toString | quote | default false }}
                 - name: CONSISTENCY_CHECK_COUNTS
-                  value: "{{ .Values.consistencyCheck.checkCounts | default false }}"
+                  value: {{ .Values.consistencyCheck.checkCounts | toString | quote | default false }}
                 - name: CONSISTENCY_CHECK_PROPERTYOWNERS
-                  value: "{{ .Values.consistencyCheck.checkPropertyOwners | default false }}"
+                  value: {{ .Values.consistencyCheck.checkPropertyOwners | toString | quote | default false }}
                 - name: CONSISTENCY_CHECK_MAXOFFHEAPMEMORY
                   value: "{{ .Values.consistencyCheck.maxOffHeapMemory | default "" | trim }}"
                 - name: CONSISTENCY_CHECK_THREADS
                   value: "{{ .Values.consistencyCheck.threads | default "" | trim }}"
                 - name: CONSISTENCY_CHECK_VERBOSE
-                  value: "{{ .Values.consistencyCheck.verbose | default true }}"
+                  value: {{ .Values.consistencyCheck.verbose | toString | quote | default true }}
+                - name: CONSISTENCY_CHECK_TEMP_DIR
+                  value: {{ .Values.consistencyCheck.tempDir | default "" | quote }}
+                - name: CONSISTENCY_CHECK_TIMEOUT
+                  value: {{ include "neo4j.backup.validateAndSetTimeout" . | quote }}
                 - name: AGGREGATE_BACKUP_ENABLED
-                  value: "{{ .Values.backup.aggregate.enabled | default false }}"
+                  value: {{ .Values.backup.aggregate.enabled | toString | quote | default false }}
                 - name: AGGREGATE_BACKUP_VERBOSE
-                  value: "{{ .Values.backup.aggregate.verbose | default true }}"
+                  value: {{ .Values.backup.aggregate.verbose | toString | quote | default true }}
                 - name: AGGREGATE_BACKUP_KEEPOLDBACKUP
-                  value: "{{ .Values.backup.aggregate.keepOldBackup | default false }}"
+                  value: {{ .Values.backup.aggregate.keepOldBackup | toString | quote | default false }}
                 - name: AGGREGATE_BACKUP_PARALLEL_RECOVERY
-                  value: "{{ .Values.backup.aggregate.parallelRecovery | default false }}"
+                  value: {{ .Values.backup.aggregate.parallelRecovery | toString | quote | default false }}
                 - name: AGGREGATE_BACKUP_FROM_PATH
                   value: "{{ .Values.backup.aggregate.fromPath | default "/backups" | trim }}"
                 - name: AGGREGATE_BACKUP_DATABASE
                   value: "{{ .Values.backup.aggregate.database | default "*" | trim  }}"
                 - name: DATABASE_BACKUP_ENDPOINTS
                   value: {{ .Values.backup.databaseBackupEndpoints | trim }}
+                - name: AGGREGATE_BACKUP_TEMP_DIR
+                  value: {{ .Values.backup.aggregate.tempDir | default "" | quote }}
               volumeMounts:
                 {{- if .Values.backup.secretName }}
                 - name: credentials
                   mountPath: /credentials
+                  readOnly: true
+                {{- end }}
+                {{- if .Values.backup.s3CASecretName }}
+                - name: s3-ca-cert
+                  mountPath: /s3-ca-cert
                   readOnly: true
                 {{- end }}
                 - name: "backup"
@@ -135,6 +211,14 @@ spec:
                 items:
                   - key: "{{ .Values.backup.secretKeyName }}"
                     path: "{{ .Values.backup.secretKeyName }}"
+            {{- end }}
+            {{- if .Values.backup.s3CASecretName }}
+            - name: s3-ca-cert
+              secret:
+                secretName: "{{ .Values.backup.s3CASecretName }}"
+                items:
+                  - key: "{{ .Values.backup.s3CASecretKey }}"
+                    path: "{{ .Values.backup.s3CASecretKey }}"
             {{- end }}
             - name: "backup"
 {{- if $.Values.tempVolume }}

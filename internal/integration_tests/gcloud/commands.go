@@ -1,12 +1,13 @@
 package gcloud
 
 import (
-	. "github.com/neo4j/helm-charts/internal/helpers"
-	"github.com/neo4j/helm-charts/internal/model"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	. "github.com/neo4j/helm-charts/internal/helpers"
+	"github.com/neo4j/helm-charts/internal/model"
 )
 
 func InstallGcloud(t *testing.T, zone Zone, project Project, releaseName model.ReleaseName) (Closeable, *model.PersistentDiskName, error) {

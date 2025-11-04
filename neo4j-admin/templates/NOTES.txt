@@ -1,0 +1,96 @@
+Neo4j Backup Helm Chart has been installed!
+
+This chart provides backup functionality for Neo4j databases.
+
+Configuration:
+- Backup Schedule: {{ $.Values.neo4j.jobSchedule | default "* * * * *" }}
+- Cloud Provider: {{ .Values.backup.cloudProvider | default "None (local backup)" }}
+- Bucket Name: {{ .Values.backup.bucketName | default "None" }}
+- Database: {{ .Values.backup.database | default "*" }}
+- Backup Type: {{ .Values.backup.type | default "AUTO" }}
+- Compress: {{ .Values.backup.compress | default true }}
+- Prefer Diff as Parent: {{ .Values.backup.preferDiffAsParent | default false }}
+{{- if .Values.backup.tempDir }}
+- Temp Directory: {{ .Values.backup.tempDir }}
+{{- end }}
+
+{{- if eq .Values.backup.cloudProvider "aws" }}
+
+AWS S3 Configuration:
+- S3 Endpoint: {{ .Values.backup.s3Endpoint | default "Default AWS S3" }}
+{{- if .Values.backup.s3Endpoint }}
+- S3 Skip Verify: {{ .Values.backup.s3SkipVerify | default false }}
+- S3 Force Path Style: {{ .Values.backup.s3ForcePathStyle | default true }}
+- S3 Region: {{ .Values.backup.s3Region | default "Default from credentials" }}
+- S3 Signature Version: {{ .Values.backup.s3SignatureVersion | default "Auto-detect" }}
+
+Neo4j will upload backup artifacts directly to S3 using native cloud storage support.
+For S3-compatible storage providers (like Cloudian, MinIO, etc.):
+1. If you encounter signature errors, try setting s3Region to a fixed value like "us-east-1"
+2. Ensure s3ForcePathStyle is set to true
+3. For older S3 implementations, try setting s3SignatureVersion to "2"
+4. If you encounter checksum errors (e.g., "Checksum Type mismatch"), try ALL of these settings together:
+   - Set s3RequestChecksumCalculation to "WHEN_REQUIRED" to disable automatic checksums
+   - Set s3ResponseChecksumValidation to "WHEN_REQUIRED" to disable checksum validation
+   - Set s3DisableMultipartChecksums to true for multipart upload checksum issues
+   
+   Example configuration for custom S3 endpoints:
+   backup:
+     s3RequestChecksumCalculation: "WHEN_REQUIRED"
+     s3ResponseChecksumValidation: "WHEN_REQUIRED"
+     s3DisableMultipartChecksums: true
+     s3ForcePathStyle: true
+     s3Region: "us-east-1"
+5. If you encounter "Unable to load HTTP implementation" errors, the chart automatically
+   configures the AWS SDK to use URLConnection HTTP client which should resolve the issue
+{{- end }}
+{{- end }}
+
+{{- if eq .Values.backup.cloudProvider "gcp" }}
+
+Google Cloud Storage Configuration:
+Neo4j will upload backup artifacts directly to Google Cloud Storage using native cloud storage support.
+{{- end }}
+
+{{- if eq .Values.backup.cloudProvider "azure" }}
+
+Azure Blob Storage Configuration:
+{{- if .Values.backup.azureStorageAccountName }}
+- Storage Account: {{ .Values.backup.azureStorageAccountName }}
+{{- end }}
+Neo4j will upload backup artifacts directly to Azure Blob Storage using native cloud storage support.
+{{- end }}
+
+{{- if .Values.backup.aggregate.enabled }}
+
+Aggregate Backup Configuration:
+- From Path: {{ .Values.backup.aggregate.fromPath }}
+- Database: {{ .Values.backup.aggregate.database | default "*" }}
+- Keep Old Backup: {{ .Values.backup.aggregate.keepOldBackup | default false }}
+{{- end }}
+
+{{- if .Values.consistencyCheck.enable }}
+
+Consistency Check Configuration:
+- Check Indexes: {{ .Values.consistencyCheck.checkIndexes | default false }}
+- Check Graph: {{ .Values.consistencyCheck.checkGraph | default false }}
+- Check Counts: {{ .Values.consistencyCheck.checkCounts | default false }}
+- Check Property Owners: {{ .Values.consistencyCheck.checkPropertyOwners | default false }}
+{{- if .Values.consistencyCheck.database }}
+- Target Database(s): {{ .Values.consistencyCheck.database }}
+{{- else }}
+- Target Database(s): All backed up databases
+{{- end }}
+{{- if .Values.consistencyCheck.tempDir }}
+- Temp Directory: {{ .Values.consistencyCheck.tempDir }}
+{{- end }}
+{{- end }}
+
+Features:
+- Immutable backup objects in cloud storage
+- Support for differential backups with --prefer-diff-as-parent
+- Direct cloud storage upload without intermediate local storage
+- Consistent backup artifacts across all cloud providers
+
+For more information, please refer to the Neo4j Operations Manual:
+https://neo4j.com/docs/operations-manual/current/backup-restore/online-backup/

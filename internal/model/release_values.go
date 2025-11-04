@@ -38,6 +38,12 @@ type Operations struct {
 	Image        string            `yaml:"image"`
 	Protocol     string            `yaml:"protocol"`
 	Labels       map[string]string `yaml:"labels"`
+	SSL          *OperationsSSL    `yaml:"ssl,omitempty"`
+}
+
+type OperationsSSL struct {
+	DisableHostnameVerification bool `yaml:"disableHostnameVerification"`
+	InsecureSkipVerify          bool `yaml:"insecureSkipVerify"`
 }
 
 type Analytics struct {
@@ -264,20 +270,37 @@ type Capabilities struct {
 	Drop []string `yaml:"drop,omitempty"`
 }
 
-type ReadinessProbe struct {
-	FailureThreshold int `yaml:"failureThreshold,omitempty"`
-	TimeoutSeconds   int `yaml:"timeoutSeconds,omitempty"`
-	PeriodSeconds    int `yaml:"periodSeconds,omitempty"`
+type ExecAction struct {
+	Command []string `yaml:"command,omitempty"`
 }
-type LivenessProbe struct {
-	FailureThreshold int `yaml:"failureThreshold,omitempty"`
-	TimeoutSeconds   int `yaml:"timeoutSeconds,omitempty"`
-	PeriodSeconds    int `yaml:"periodSeconds,omitempty"`
+
+type GRPCAction struct {
+	Port    int32  `yaml:"port,omitempty"`
+	Service string `yaml:"service,omitempty"`
 }
-type StartupProbe struct {
-	FailureThreshold int `yaml:"failureThreshold,omitempty"`
-	PeriodSeconds    int `yaml:"periodSeconds,omitempty"`
+
+type HTTPGetAction struct {
+	Path string `yaml:"path"`
+	Port int32  `yaml:"port"`
 }
+
+type TCPSocketAction struct {
+	Port int32 `yaml:"port"`
+}
+
+type Probe struct {
+	HTTPGet             *HTTPGetAction   `yaml:"httpGet,omitempty"`
+	TCPSocket           *TCPSocketAction `yaml:"tcpSocket,omitempty"`
+	InitialDelaySeconds int32            `yaml:"initialDelaySeconds,omitempty"`
+	TimeoutSeconds      int32            `yaml:"timeoutSeconds,omitempty"`
+	PeriodSeconds       int32            `yaml:"periodSeconds,omitempty"`
+	FailureThreshold    int32            `yaml:"failureThreshold,omitempty"`
+}
+
+type ReadinessProbe Probe
+type LivenessProbe Probe
+type StartupProbe Probe
+
 type PrivateKey struct {
 	SecretName interface{} `yaml:"secretName,omitempty"`
 	SubPath    interface{} `yaml:"subPath,omitempty"`

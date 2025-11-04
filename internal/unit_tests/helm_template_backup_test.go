@@ -322,7 +322,7 @@ func TestNeo4jBackupPodAffinity(t *testing.T) {
 	helmValues.Backup.CloudProvider = "aws"
 	helmValues.Backup.BucketName = "demo2"
 	helmValues.Backup.Database = "neo4j1"
-
+	helmValues.Backup.AggregateBackup = model.AggregateBackup{}
 	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
 	assert.NoError(t, err, "error seen while performing helm template on backup helm chart with affinity")
 	cronjobs := manifests.OfType(&batchv1.CronJob{})
@@ -375,6 +375,94 @@ func TestEmptyBucketName(t *testing.T) {
 	assert.Error(t, err, "error not seen while checking for empty bucket name")
 	assert.Contains(t, err.Error(), "Empty bucketName. Please set bucketName via --set backup.bucketName")
 
+}
+
+// TestCustomS3EndpointConfiguration tests that custom S3 endpoint configuration is properly set
+func TestCustomS3EndpointConfiguration(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.Database = "neo4j"
+
+	// Set custom S3 endpoint configuration
+	helmValues.Backup.S3Endpoint = "https://s3.example.com"
+	helmValues.Backup.S3ForcePathStyle = true
+	helmValues.Backup.S3Region = "us-east-1"
+	helmValues.Backup.S3SignatureVersion = "4"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err, "error seen while trying to install helm backup with custom S3 endpoint")
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+	cronjob := cronjobs[0].(*batchv1.CronJob)
+
+	containers := cronjob.Spec.JobTemplate.Spec.Template.Spec.Containers
+	assert.Len(t, containers, 1, "there should be only one container present")
+	container := containers[0]
+
+	// Verify that the custom S3 endpoint environment variables are properly set
+	envVariables := container.Env
+
+	// Check for AWS_ENDPOINT_URL_S3
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "AWS_ENDPOINT_URL_S3", Value: "https://s3.example.com"},
+		"AWS_ENDPOINT_URL_S3 should be set to custom endpoint")
+
+	// Check for S3_FORCE_PATH_STYLE
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "S3_FORCE_PATH_STYLE", Value: "true"},
+		"S3_FORCE_PATH_STYLE should be set to true")
+
+	// Check for AWS_REGION
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "AWS_REGION", Value: "us-east-1"},
+		"AWS_REGION should be set to custom region")
+
+	// Check for AWS_DEFAULT_REGION
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "AWS_DEFAULT_REGION", Value: "us-east-1"},
+		"AWS_DEFAULT_REGION should be set to custom region")
+
+	// Check for S3_SIGNATURE_VERSION
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "S3_SIGNATURE_VERSION", Value: "4"},
+		"S3_SIGNATURE_VERSION should be set to 4")
+}
+
+// TestDefaultS3Configuration tests that default S3 configuration works without custom endpoint
+func TestDefaultS3Configuration(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.Database = "neo4j"
+
+	// Don't set custom S3 endpoint - use default AWS S3
+	// helmValues.Backup.S3Endpoint = "" // This should be empty
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err, "error seen while trying to install helm backup with default S3 configuration")
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+	cronjob := cronjobs[0].(*batchv1.CronJob)
+
+	containers := cronjob.Spec.JobTemplate.Spec.Template.Spec.Containers
+	assert.Len(t, containers, 1, "there should be only one container present")
+	container := containers[0]
+
+	// Verify that AWS_ENDPOINT_URL_S3 is NOT set when no custom endpoint is configured
+	envVariables := container.Env
+
+	for _, envVar := range envVariables {
+		assert.NotEqual(t, "AWS_ENDPOINT_URL_S3", envVar.Name,
+			"AWS_ENDPOINT_URL_S3 should not be set when using default AWS S3")
+	}
 }
 
 // TestOnPremScenario checks for any errors when backup is performed on onprem
@@ -485,7 +573,6 @@ func TestBackupMultipleEndpoints(t *testing.T) {
 
 	helmValues := model.DefaultNeo4jBackupValues
 	helmValues.Backup.DatabaseBackupEndpoints = backupEndpoints
-	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
 
 	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
 	assert.NoError(t, err, "error generating helm template with multiple backup endpoints")
@@ -497,4 +584,945 @@ func TestBackupMultipleEndpoints(t *testing.T) {
 		Name:  "DATABASE_BACKUP_ENDPOINTS",
 		Value: backupEndpoints,
 	}, "backup endpoints not set correctly in cronjob")
+}
+
+// TestAggregateBackupWithTempDir checks for tempDir in the aggregate backup
+func TestAggregateBackupWithTempDir(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = ""
+	helmValues.Backup.AggregateBackup = model.AggregateBackup{
+		Enabled:  true,
+		FromPath: "s3://demo-bucket",
+		TempDir:  "/custom/temp/dir",
+	}
+	helmValues.ServiceAccountName = "demo"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err, "error seen while performing aggregate backup with tempDir")
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+
+	envVariables := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, variable := range envVariables {
+		if variable.Name == "AGGREGATE_BACKUP_TEMP_DIR" {
+			found = true
+			assert.Equal(t, variable.Value, helmValues.Backup.AggregateBackup.TempDir)
+			break
+		}
+	}
+	assert.Equal(t, found, true)
+}
+
+// TestAggregateBackupDefaultTempDir checks that aggregate backup uses /backups as default temp directory
+func TestAggregateBackupDefaultTempDir(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.AggregateBackup = model.AggregateBackup{
+		Enabled:  true,
+		FromPath: "s3://demo-bucket",
+		// No TempDir specified - should default to /backups
+	}
+	helmValues.ServiceAccountName = "demo"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err, "error seen while performing aggregate backup with default tempDir")
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+
+	envVariables := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+
+	// AGGREGATE_BACKUP_TEMP_DIR should not be set when using default
+	for _, variable := range envVariables {
+		if variable.Name == "AGGREGATE_BACKUP_TEMP_DIR" {
+			assert.Equal(t, "", variable.Value, "AGGREGATE_BACKUP_TEMP_DIR should be empty when using default")
+		}
+	}
+}
+
+// TestBackupS3CASecretValidation checks that s3CASecretKey is required when s3CASecretName is provided
+func TestBackupS3CASecretValidation(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "demo1"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "demo2"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.S3CASecretName = "my-ca-cert"
+
+	_, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "If backup.s3CASecretName is specified, backup.s3CASecretKey must also be specified")
+}
+
+// TestBackupS3CASecretConfiguration checks the S3 CA certificate configuration
+func TestBackupS3CASecretConfiguration(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "demo1"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "demo2"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.S3CASecretName = "my-ca-cert"
+	helmValues.Backup.S3CASecretKey = "ca.crt"
+	helmValues.Backup.S3Endpoint = "s3.example.com"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+	cronjob := cronjobs[0].(*batchv1.CronJob)
+
+	// TLS is now automatically handled by AWS_ENDPOINT_URL_S3 (https:// = TLS enabled)
+
+	var certMountFound bool
+	for _, volumeMount := range cronjob.Spec.JobTemplate.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if volumeMount.Name == "s3-ca-cert" {
+			certMountFound = true
+			assert.Equal(t, "/s3-ca-cert", volumeMount.MountPath)
+			assert.True(t, volumeMount.ReadOnly)
+		}
+	}
+	assert.True(t, certMountFound, "s3-ca-cert volume mount not found")
+
+	var certVolumeFound bool
+	for _, volume := range cronjob.Spec.JobTemplate.Spec.Template.Spec.Volumes {
+		if volume.Name == "s3-ca-cert" {
+			certVolumeFound = true
+			assert.Equal(t, "my-ca-cert", volume.Secret.SecretName)
+			assert.Len(t, volume.Secret.Items, 1)
+			assert.Equal(t, "ca.crt", volume.Secret.Items[0].Key)
+			assert.Equal(t, "ca.crt", volume.Secret.Items[0].Path)
+		}
+	}
+	assert.True(t, certVolumeFound, "s3-ca-cert volume not found")
+}
+
+// TestBackupS3GenericParameters checks that the new S3 parameters are correctly set in the environment variables
+func TestBackupS3GenericParameters(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup = model.Backup{
+		BucketName:               "test-bucket",
+		DatabaseAdminServiceName: "neo4j-admin",
+		CloudProvider:            "aws",
+		SecretName:               "demo",
+		SecretKeyName:            "credentials",
+		S3Endpoint:               "https://s3.example.com",
+		S3ForcePathStyle:         true,
+		S3Region:                 "us-east-1",
+		S3SignatureVersion:       "4",
+	}
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+
+	envVariables := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+
+	// Check that the S3 parameters are correctly set in the environment variables
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "S3_FORCE_PATH_STYLE", Value: "true"})
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "AWS_REGION", Value: "us-east-1"})
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "S3_SIGNATURE_VERSION", Value: "4"})
+	assert.Contains(t, envVariables, corev1.EnvVar{Name: "AWS_ENDPOINT_URL_S3", Value: "https://s3.example.com"})
+}
+
+// TestBackupCompressEnvVarDefaultTrue checks that the Compress value is set to true correctly when the variable is not specified
+func TestBackupCompressEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	// Test without setting helmValues.Backup.Compress
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.Compress = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "COMPRESS" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected COMPRESS to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "COMPRESS env var not found")
+}
+
+// TestBackupCompressEnvVarFalse checks that the Compress value is set to false when explicitly set as such
+func TestBackupCompressEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.Compress = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "COMPRESS" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected COMPRESS to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "COMPRESS env var not found")
+}
+
+// TestBackupWithTempDir checks for tempDir in the regular backup
+func TestBackupWithTempDir(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.TempDir = "/custom/backup/temp/dir"
+	helmValues.ServiceAccountName = "demo"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err, "error seen while performing backup with tempDir")
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+
+	envVariables := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, variable := range envVariables {
+		if variable.Name == "BACKUP_TEMP_DIR" {
+			found = true
+			assert.Equal(t, variable.Value, helmValues.Backup.TempDir)
+			break
+		}
+	}
+	assert.Equal(t, found, true)
+}
+
+// TestBackupVerboseEnvVarDefaultTrue checks that the Verbose value is set to true correctly
+func TestBackupVerboseEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "standalone-admin"
+	helmValues.Backup.Verbose = true
+	helmValues.ServiceAccountName = "demo"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err, "error seen while performing backup with verbose")
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1, "there should be only one cronjob")
+
+	envVariables := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, variable := range envVariables {
+		if variable.Name == "VERBOSE" {
+			found = true
+			assert.Equal(t, "true", variable.Value)
+			break
+		}
+	}
+	assert.True(t, found, "VERBOSE env var not found")
+}
+
+// TestBackupVerboseEnvVarFalse checks that the Verbose value is set to false when explicitly set as such
+func TestBackupVerboseEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.Verbose = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "VERBOSE" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected VERBOSE to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "VERBOSE env var not found")
+}
+
+// TestBackupKeepBackupFilesEnvVarDefaultTrue checks that the KeepBackupFiles value is set to true correctly
+func TestBackupKeepBackupFilesEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.KeepBackupFiles = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "KEEP_BACKUP_FILES" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected KEEP_BACKUP_FILES to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "KEEP_BACKUP_FILES env var not found")
+}
+
+// TestBackupKeepBackupFilesEnvVarFalse checks that the KeepBackupFiles value is set to false when explicitly set as such
+func TestBackupKeepBackupFilesEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.KeepBackupFiles = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "KEEP_BACKUP_FILES" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected KEEP_BACKUP_FILES to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "KEEP_BACKUP_FILES env var not found")
+}
+
+// TestS3ForcePathStyleEnvVarDefaultTrue checks that the S3ForcePathStyle value is set to true correctly
+func TestS3ForcePathStyleEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.S3ForcePathStyle = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "S3_FORCE_PATH_STYLE" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected S3_FORCE_PATH_STYLE to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "S3_FORCE_PATH_STYLE env var not found")
+}
+
+// TestS3ForcePathStyleEnvVarFalse checks that the S3ForcePathStyle value is set to false when explicitly set as such
+func TestS3ForcePathStyleEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.S3ForcePathStyle = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "S3_FORCE_PATH_STYLE" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected S3_FORCE_PATH_STYLE to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "S3_FORCE_PATH_STYLE env var not found")
+}
+
+// TestAggregateBackupVerboseEnvVarDefaultTrue checks that the AggregateBackup.Verbose value is set to true correctly
+func TestAggregateBackupVerboseEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.AggregateBackup.Enabled = true
+	helmValues.Backup.AggregateBackup.Verbose = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "AGGREGATE_BACKUP_VERBOSE" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected AGGREGATE_BACKUP_VERBOSE to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "AGGREGATE_BACKUP_VERBOSE env var not found")
+}
+
+// TestAggregateBackupVerboseEnvVarFalse checks that the AggregateBackup.Verbose value is set to false when explicitly set as such
+func TestAggregateBackupVerboseEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.AggregateBackup.Enabled = true
+	helmValues.Backup.AggregateBackup.Verbose = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "AGGREGATE_BACKUP_VERBOSE" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected AGGREGATE_BACKUP_VERBOSE to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "AGGREGATE_BACKUP_VERBOSE env var not found")
+}
+
+// TestConsistencyCheckCheckIndexesEnvVarDefaultTrue checks that the ConsistencyCheck.CheckIndexes value is set to true correctly
+func TestConsistencyCheckCheckIndexesEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckIndexes = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_INDEXES" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected CONSISTENCY_CHECK_INDEXES to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_INDEXES env var not found")
+}
+
+// TestConsistencyCheckCheckIndexesEnvVarFalse checks that the ConsistencyCheck.CheckIndexes value is set to false when explicitly set as such
+func TestConsistencyCheckCheckIndexesEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckIndexes = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_INDEXES" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected CONSISTENCY_CHECK_INDEXES to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_INDEXES env var not found")
+}
+
+// TestConsistencyCheckCheckGraphEnvVarDefaultTrue checks that the ConsistencyCheck.CheckGraph value is set to true correctly
+func TestConsistencyCheckCheckGraphEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckGraph = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_GRAPH" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected CONSISTENCY_CHECK_GRAPH to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_GRAPH env var not found")
+}
+
+// TestConsistencyCheckCheckGraphEnvVarFalse checks that the ConsistencyCheck.CheckGraph value is set to false when explicitly set as such
+func TestConsistencyCheckCheckGraphEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckGraph = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_GRAPH" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected CONSISTENCY_CHECK_GRAPH to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_GRAPH env var not found")
+}
+
+// TestConsistencyCheckCheckCountsEnvVarDefaultTrue checks that the ConsistencyCheck.CheckCounts value is set to true correctly
+func TestConsistencyCheckCheckCountsEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckCounts = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_COUNTS" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected CONSISTENCY_CHECK_COUNTS to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_COUNTS env var not found")
+}
+
+// TestConsistencyCheckCheckCountsEnvVarFalse checks that the ConsistencyCheck.CheckCounts value is set to false when explicitly set as such
+func TestConsistencyCheckCheckCountsEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckCounts = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_COUNTS" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected CONSISTENCY_CHECK_COUNTS to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_COUNTS env var not found")
+}
+
+// TestConsistencyCheckCheckPropertyOwnersEnvVarDefaultTrue checks that the ConsistencyCheck.CheckPropertyOwners value is set to true correctly
+func TestConsistencyCheckCheckPropertyOwnersEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckPropertyOwners = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_PROPERTYOWNERS" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected CONSISTENCY_CHECK_PROPERTYOWNERS to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_PROPERTYOWNERS env var not found")
+}
+
+// TestConsistencyCheckCheckPropertyOwnersEnvVarFalse checks that the ConsistencyCheck.CheckPropertyOwners value is set to false when explicitly set as such
+func TestConsistencyCheckCheckPropertyOwnersEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.CheckPropertyOwners = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_PROPERTYOWNERS" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected CONSISTENCY_CHECK_PROPERTYOWNERS to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_PROPERTYOWNERS env var not found")
+}
+
+// TestConsistencyCheckVerboseEnvVarDefaultTrue checks that the ConsistencyCheck.Verbose value is set to true correctly
+func TestConsistencyCheckVerboseEnvVarDefaultTrue(t *testing.T) {
+	t.Parallel()
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.Verbose = true
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_VERBOSE" {
+			found = true
+			assert.Equal(t, "true", env.Value, "Expected CONSISTENCY_CHECK_VERBOSE to be true by default")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_VERBOSE env var not found")
+}
+
+// TestConsistencyCheckVerboseEnvVarFalse checks that the ConsistencyCheck.Verbose value is set to false when explicitly set as such
+func TestConsistencyCheckVerboseEnvVarFalse(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.ConsistencyCheck.Verbose = false
+
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "key"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_VERBOSE" {
+			found = true
+			assert.Equal(t, "false", env.Value, "Expected CONSISTENCY_CHECK_VERBOSE to be false when explicitly disabled")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_VERBOSE env var not found")
+}
+
+// TestBackupWithRegistryAndPullSecrets checks if registry is used in image and pull secrets are set
+func TestBackupWithRegistryAndPullSecrets(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Neo4J.Registry = "myregistry.com"
+	helmValues.Neo4J.ImagePullSecrets = []string{"my-pull-secret"}
+
+	// Set required fields
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "credentials"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	cronjob := cronjobs[0].(*batchv1.CronJob)
+	container := cronjob.Spec.JobTemplate.Spec.Template.Spec.Containers[0]
+
+	expectedImage := "myregistry.com/" + helmValues.Neo4J.Image + ":" + helmValues.Neo4J.ImageTag
+	assert.Equal(t, expectedImage, container.Image)
+
+	pullSecrets := cronjob.Spec.JobTemplate.Spec.Template.Spec.ImagePullSecrets
+	assert.Len(t, pullSecrets, 1)
+	assert.Equal(t, "my-pull-secret", pullSecrets[0].Name)
+}
+
+// TestConsistencyCheckTimeoutDefaultValue checks that the default timeout is set correctly for cloud storage
+func TestConsistencyCheckTimeoutDefaultValue(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "credentials"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+	helmValues.ConsistencyCheck.Enable = true
+	// timeout not specified - should default to "30m" for cloud storage
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_TIMEOUT" {
+			found = true
+			assert.Equal(t, "30m", env.Value, "Expected CONSISTENCY_CHECK_TIMEOUT to default to 30m for cloud storage")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_TIMEOUT env var not found")
+}
+
+// TestConsistencyCheckTimeoutCustomValue checks that a custom timeout value is set correctly
+func TestConsistencyCheckTimeoutCustomValue(t *testing.T) {
+	t.Parallel()
+
+	helmValues := model.DefaultNeo4jBackupValues
+	helmValues.DisableLookups = true
+	helmValues.Backup.SecretName = "demo"
+	helmValues.Backup.SecretKeyName = "credentials"
+	helmValues.Backup.CloudProvider = "aws"
+	helmValues.Backup.BucketName = "test-bucket"
+	helmValues.Backup.DatabaseAdminServiceName = "admin"
+	helmValues.Backup.Database = "neo4j"
+	helmValues.ConsistencyCheck.Enable = true
+	helmValues.ConsistencyCheck.Timeout = "2h"
+
+	manifests, err := model.HelmTemplateFromStruct(t, model.BackupHelmChart, helmValues)
+	assert.NoError(t, err)
+
+	cronjobs := manifests.OfType(&batchv1.CronJob{})
+	assert.Len(t, cronjobs, 1)
+
+	envVars := cronjobs[0].(*batchv1.CronJob).Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	var found bool
+	for _, env := range envVars {
+		if env.Name == "CONSISTENCY_CHECK_TIMEOUT" {
+			found = true
+			assert.Equal(t, "2h", env.Value, "Expected CONSISTENCY_CHECK_TIMEOUT to be set to custom value 2h")
+			break
+		}
+	}
+	assert.True(t, found, "CONSISTENCY_CHECK_TIMEOUT env var not found")
 }

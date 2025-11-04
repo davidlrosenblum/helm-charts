@@ -6,10 +6,12 @@
 {{- $backupEnabled := false }}
 {{- $httpEnabled := index $.Values.config "server.http.enabled" | default "true" | regexMatch "(?i)yes|true" }}
 {{- $httpsEnabled := index $.Values.config "server.https.enabled" | default "false" | regexMatch "(?i)yes|true" }}
+{{- $prometheusEnabled := index $.Values.config "server.metrics.prometheus.enabled" | default "" | regexMatch "(?i)yes|true" }}
 {{- if $isEnterprise }}
 {{- $backupEnabled = index $.Values.config "server.backup.enabled" | default "true" | regexMatch "(?i)yes|true" }}
 {{- end }}
 {{- template "neo4j.volumes.validation" . -}}
+{{- template "neo4j.secretMounts.validation" . -}}
 {{- template "neo4j.checkNodeSelectorLabels" . -}}
 {{- template "neo4j.checkLicenseAgreement" . -}}
 {{- template "podSpec.checkLoadBalancerParam" . -}}
@@ -55,7 +57,7 @@ spec:
     spec:
       {{- include "neo4j.affinity" . | indent 6 }}
       {{- if or $.Values.analytics.enabled $.Values.podSpec.serviceAccountName $clusterEnabled }}
-      serviceAccountName: "{{ if kindIs "string" $.Values.podSpec.serviceAccountName | and $.Values.podSpec.serviceAccountName }}{{ $.Values.podSpec.serviceAccountName }}{{ else }}{{ include "neo4j.fullname" . }}{{ end }}"
+      serviceAccountName: {{ include "neo4j.serviceAccountName" . }}
       {{- end }}
       dnsPolicy: {{ .Values.podSpec.dnsPolicy | default "ClusterFirst" }}
       securityContext: {{ toYaml .Values.securityContext | nindent 8 }}
@@ -125,6 +127,10 @@ spec:
             - containerPort: 6362
               name: backup
             {{- end }}
+            {{- if $prometheusEnabled }}
+            - containerPort: 2004
+              name: tcp-prometheus
+            {{- end }}
           {{- with .Values.neo4j.resources }}
           resources:
             {{- if hasKey . "requests" | or (hasKey . "limits") }}
@@ -152,29 +158,17 @@ spec:
             {{- include "neo4j.ldapVolumeMount" . | indent 12 }}
             {{- include "neo4j.volumeMounts" .Values.volumes | indent 12 }}
             {{- include "neo4j.ssl.volumeMountsFromSecrets" .Values.ssl | indent 12 }}
+            {{- include "neo4j.secretMounts.volumeMounts" . | indent 12 }}
             {{- if $offlineMaintenanceEnabled  }}
             {{- include "neo4j.maintenanceVolumeMounts" .Values.volumes | indent 12 }}
             {{- end }}
-          readinessProbe:
-            tcpSocket:
-              port: 7687
-            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
-            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
-            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          {{- include "neo4j.readinessProbe" .Values.readinessProbe | nindent 10 }}  
+          
           {{- if $offlineMaintenanceEnabled }}
           # liveness and startup probes are disabled in offlineMaintenanceMode
           {{- else }}
-          livenessProbe:
-            tcpSocket:
-              port: 7687
-            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
-            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
-            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
-          startupProbe:
-            tcpSocket:
-              port: 7687
-            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
-            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+          {{- include "neo4j.livenessProbe" .Values.livenessProbe | nindent 10 }}
+          {{- include "neo4j.startupProbe" .Values.startupProbe | nindent 10 }}
           {{- end }}
         {{- with .Values.podSpec.containers }}
         # Extra "sidecar" containers
@@ -218,6 +212,7 @@ spec:
         {{- include "neo4j.apocCredentials.volume" . | indent 8 }}
         {{- include "neo4j.ldapVolume" . | indent 8 }}
         {{- with include "neo4j.ssl.volumesFromSecrets" .Values.ssl }}{{ nindent 8 .}}{{ end -}}
+        {{- include "neo4j.secretMounts.volumes" . | indent 8 }}
         {{- with include "neo4j.volumes" . }}{{ nindent 8 . }}{{ end -}}
   {{- $volumeClaimTemplates := include "neo4j.volumeClaimTemplates" . -}}
   {{- if $volumeClaimTemplates }}
