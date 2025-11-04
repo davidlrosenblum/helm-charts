@@ -4,7 +4,7 @@
   {{- if not (kindIs "string" .Values.neo4j.acceptLicenseAgreement) | or (not .Values.neo4j.acceptLicenseAgreement) }}
   {{- include "neo4j.licenseAgreementMessage" .Values.neo4j.acceptLicenseAgreement | fail }}
   {{- else }}
-  {{- if ne .Values.neo4j.acceptLicenseAgreement "yes" }}
+  {{- if and ( ne .Values.neo4j.acceptLicenseAgreement "yes")  (ne .Values.neo4j.acceptLicenseAgreement "eval") }}
     {{- include "neo4j.licenseAgreementMessage" .Values.neo4j.acceptLicenseAgreement | fail }}
   {{- end }}
   {{- end }}
